@@ -6,6 +6,17 @@ converted).  :func:`poll_once` is the primitive - one round, one connection,
 pure data in and out; :func:`watch` and :func:`run_watch` loop over it with an
 injectable ``sleep`` and an optional stop :class:`threading.Event`.
 
+Every :class:`Event` carries the :class:`Cursor` to persist once *that* event
+has been handled (``event.cursor``), so a consumer of the :func:`watch`
+generator can checkpoint after each event and, after a crash, resume from the
+last checkpoint with at-least-once delivery - nothing between the checkpoint
+and the crash is lost, and the event that was being handled is delivered
+again.  Edited rows that share one raw ``date_edited`` (a tie) are treated as
+a group: the mark advances past the value only on the group's last event, so
+resuming from an earlier member's cursor re-delivers the whole group rather
+than skipping its remaining members (the resume query is strict,
+``date_edited > mark``).
+
 The rules of a round are those of the relay's polling loop:
 new rows strictly after the cursor, ascending by ROWID; then rows whose
 ``date_edited`` advanced past the mark, ascending by ``date_edited``; the
@@ -14,6 +25,10 @@ only forward.  Two things are the library's own: a database whose ``MAX(ROWID)``
 fell below the cursor raises :class:`CursorAhead` (the relay's generic
 ``except`` would spin on it), and a locked database yields ``([], cursor)`` so
 a caller can simply try again next round.
+
+This module is ``imessage_chatdb.polling``; its five names (``Cursor``,
+``Event``, ``poll_once``, ``watch``, ``run_watch``) are re-exported by the
+package, so ``from imessage_chatdb import watch`` is the generator function.
 """
 
 from __future__ import annotations
@@ -61,10 +76,28 @@ class Cursor:
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    """One thing that happened: a ``"new"`` message or an ``"edited"`` one."""
+    """One thing that happened: a ``"new"`` message or an ``"edited"`` one.
+
+    ``cursor`` is the :class:`Cursor` to persist once this event has been
+    handled - resuming from it re-delivers nothing before this event and
+    everything after it (at-least-once: the event itself is delivered again
+    only if the crash happened between handling it and persisting).  Within a
+    round, a ``"new"`` event's cursor is ``Cursor(rowid=<its ROWID>,
+    edit_mark=<the round's starting mark>)``; an ``"edited"`` event's cursor
+    is ``Cursor(rowid=<the round's final ROWID>, edit_mark=<the largest raw
+    date_edited of the events so far, excluding this event's own value while
+    a later event in the round shares it>)``.  That exclusion is the tie rule:
+    edited rows with the same raw ``date_edited`` form a group, only the
+    group's last event advances the mark past that value, and resuming from
+    any earlier member's cursor re-delivers the whole group (the already
+    handled members again, at-least-once) instead of losing the rest of it.
+    The last event's cursor is the cursor :func:`poll_once` returns for the
+    round.
+    """
 
     kind: EventKind
     message: Message
+    cursor: Cursor
 
 
 def poll_once(
@@ -83,6 +116,10 @@ def poll_once(
       and never regresses.
     - ``"new"`` events precede ``"edited"`` events within the round.  A row that
       is both new and edited since the mark appears twice, as in the relay.
+    - Each event's ``cursor`` is the one to persist after handling it (see
+      :class:`Event`); the last event's cursor equals ``new_cursor``.  Edited
+      rows tied on ``date_edited`` advance the mark only on the tie's last
+      event, so a checkpoint inside a tie replays the tie, never skips it.
     - :class:`ChatDBBusy` anywhere in the round -> ``([], cursor)``: no events,
       nothing advanced, safe to retry.
     """
@@ -102,8 +139,25 @@ def poll_once(
                     mark = cursor.edit_mark
     except ChatDBBusy:
         return [], cursor
-    events: list[Event] = [Event("new", m) for m in new]
-    events.extend(Event("edited", m) for m in edited)
+    events: list[Event] = [
+        Event("new", m, Cursor(rowid=m.rowid, edit_mark=cursor.edit_mark)) for m in new
+    ]
+    running = cursor.edit_mark
+    for i, m in enumerate(edited):
+        value = m.date_edited or 0
+        # Rows are ordered by date_edited, so ties are adjacent.  The resume
+        # query is strict (``> mark``): advancing the mark to ``value`` on an
+        # event that still has tied siblings after it would make a checkpoint
+        # taken there skip those siblings.  So the mark passes ``value`` only
+        # on the last event carrying it; earlier members keep the previous
+        # mark and a resume from them replays the whole tie (at-least-once).
+        last_of_value = i + 1 == len(edited) or (edited[i + 1].date_edited or 0) != value
+        if last_of_value:
+            running = max(running, value)
+        events.append(Event("edited", m, Cursor(rowid=rowid, edit_mark=running)))
+    # ``running`` ends at ``mark`` (same rows, same raw values, and the final
+    # event is always the last of its value), so the last event's cursor is
+    # exactly the round's cursor; test_watch.py pins it.
     return events, Cursor(rowid=rowid, edit_mark=mark)
 
 
@@ -145,10 +199,13 @@ def watch(
     """Yield :class:`Event` objects forever (or until ``stop`` is set).
 
     ``cursor=None`` starts at ``db.initial_cursor()`` - "now", with no replay.
-    Between rounds the generator calls ``sleep(interval)`` (injectable for
-    tests).  :class:`CursorAhead` propagates: it means the database was rebuilt
-    and only the caller knows whether to replay.  Each round is a
-    :func:`poll_once`, so a busy database simply produces no events that round.
+    Persist ``event.cursor`` (:meth:`Cursor.to_json`) after handling each
+    event and pass it back as ``cursor`` on restart to resume where you
+    stopped.  Between rounds the generator calls ``sleep(interval)``
+    (injectable for tests).  :class:`CursorAhead` propagates: it means the
+    database was rebuilt and only the caller knows whether to replay.  Each
+    round is a :func:`poll_once`, so a busy database simply produces no events
+    that round.
     """
     for events, _cursor, _advanced in _rounds(
         db, cursor, interval=interval, stop=stop, include_edits=include_edits, sleep=sleep
@@ -169,10 +226,11 @@ def run_watch(
 ) -> None:
     """Callback form of :func:`watch`.
 
-    ``on_event`` receives every event in order; ``on_cursor`` (when given)
-    receives the new :class:`Cursor` after each round that advanced it - the
-    hook for persisting progress with :meth:`Cursor.to_json`.  The remaining
-    keywords are :func:`watch`'s.  Returns when ``stop`` is set.
+    ``on_event`` receives every event in order (each carrying its own
+    ``cursor``); ``on_cursor`` (when given) receives the new :class:`Cursor`
+    after each round that advanced it - the per-round hook for persisting
+    progress with :meth:`Cursor.to_json`.  The remaining keywords are
+    :func:`watch`'s.  Returns when ``stop`` is set.
     """
     for events, cur, advanced in _rounds(
         db, cursor, interval=interval, stop=stop, include_edits=include_edits, sleep=sleep

@@ -122,6 +122,29 @@ def test_help_returns_0(capsys: pytest.CaptureFixture[str]) -> None:
     assert "--since-rowid" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "argv", [["--help"], ["tail", "--help"], ["chats", "--help"], ["search", "--help"]]
+)
+def test_help_carries_the_privacy_note(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """tail/chats/search print content (text, handles, chat names); --help says so."""
+    import imessage_chatdb.__main__ as cli
+
+    assert main(argv) == EXIT_OK
+    out = " ".join(capsys.readouterr().out.split())  # argparse re-wraps the epilog
+    assert "message content" in out and "remote pipe" in out
+    assert "tail, chats and search print message content" in out
+    assert cli.__doc__ is not None and "remote pipe" in cli.__doc__
+    assert "``chats``" in cli.__doc__.split("Privacy:")[1].split("Exit codes")[0]
+
+
+def test_check_help_has_no_privacy_note(capsys: pytest.CaptureFixture[str]) -> None:
+    """``check`` prints no content (path, profile, max ROWID only), so no note."""
+    assert main(["check", "--help"]) == EXIT_OK
+    assert "remote pipe" not in capsys.readouterr().out
+
+
 def test_usage_error_exit_code_from_a_subprocess() -> None:
     """``python -m imessage_chatdb chekc`` exits 64 (not 2) at the OS level too."""
     import subprocess

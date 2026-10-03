@@ -33,7 +33,7 @@ Project home: <https://github.com/Avtraang/imessage-chatdb> · Python >= 3.12 ·
 - cross-platform. Everything but the default path works anywhere SQLite does
   (the test-suite runs on Linux), but the database only exists on a Mac.
 
-## 2. Install and Full Disk Access (30 seconds)
+## 2. Install and Full Disk Access (30 seconds) The only system requirement is that one-time Full Disk Access grant: System Integrity Protection (SIP) stays on, nothing is injected into Messages, and no private API is used — reading a file is all this library does.
 
 ```sh
 pip install imessage-chatdb
@@ -77,7 +77,11 @@ python -m imessage_chatdb search "dinner" --limit 10  # SearchHit.to_dict(), new
 
 Every subcommand takes `--db PATH` (default `~/Library/Messages/chat.db`).
 `tail` without `--since-rowid` starts at *now*, like `watch()`: it prints
-nothing unless `--follow` is given. Exit codes: 0 ok (also `--help`), 2
+nothing unless `--follow` is given. **Privacy:** `tail`, `chats` and `search`
+print message content (text, handles, chat names) to stdout as JSON lines, so
+do not point them at a log file or a remote pipe — the library itself never
+logs or prints message content, and `check` prints only the path, profile and
+max ROWID. Exit codes: 0 ok (also `--help`), 2
 cannot open the database (message on stderr), 1 any other library error
 (busy, schema), 64 command-line usage error (unknown subcommand, bad flag or
 value; usage on stderr), 130 interrupted. `main(argv)` returns these codes
@@ -110,26 +114,45 @@ for m in db.thread_messages(newest.guid, limit=20):   # oldest -> newest
     print(m.datetime, who, m.clean_text, [a.transfer_name for a in m.attachments])
 ```
 
-### Tail new messages with `watch()`
+### Tail new messages with `watch()`, persisting the cursor
 
 ```python
+import json
+from pathlib import Path
 import imessage_chatdb
+from imessage_chatdb import Cursor
 
+STATE = Path("~/.imessage-cursor.json").expanduser()
 db = imessage_chatdb.open()
-for event in db.watch(interval=2.0):             # blocks; Ctrl-C to stop
+if STATE.exists():
+    cursor = Cursor.from_json(json.loads(STATE.read_text()))   # resume where the last run stopped
+else:
+    cursor = db.initial_cursor()                               # first run: start at now, no replay
+
+for event in db.watch(cursor, interval=2.0):     # blocks; Ctrl-C to stop
     m = event.message
     print(event.kind, m.rowid, m.chat_guid, m.clean_text)   # kind: "new" | "edited"
+    STATE.write_text(json.dumps(event.cursor.to_json()))    # persist AFTER handling the event
 ```
 
-`watch()` starts at *now* (no replay), opens a fresh connection per round,
-yields `"new"` events before `"edited"` events within a round, and simply
-yields nothing in a round where the database is busy.
+Every `Event` carries `event.cursor`, the `Cursor` to persist once *that* event
+has been handled; resuming from it re-delivers nothing before the event and
+everything after it. Persisting after handling gives **at-least-once**
+delivery: a crash between handling an event and writing its cursor re-delivers
+that one event on restart, and nothing between the last checkpoint and the
+crash is lost — so make your consumer idempotent on `(kind, rowid)`. The one
+place "nothing before" is relaxed is a tie: `"edited"` rows that share the
+same raw `date_edited` form a group, only the group's last event advances
+`edit_mark` past that value, and a checkpoint taken on an earlier member
+replays the whole group on restart (the handled members again, never the
+unhandled ones skipped).
 
-> **Gotcha:** `imessage_chatdb.watch` is the *submodule*, not the generator.
-> The package deliberately does not re-export `watch()` (doing so would rebind
-> the module attribute to a function), so call `db.watch(...)` or
-> `imessage_chatdb.watch.watch(...)`. `from imessage_chatdb.watch import Cursor, watch`
-> and `importlib.import_module("imessage_chatdb.watch")` both work as expected.
+`watch(None)` starts at *now* (no replay), opens a fresh connection per round,
+yields `"new"` events before `"edited"` events within a round, and simply
+yields nothing in a round where the database is busy. The polling code lives
+in `imessage_chatdb.polling`; `watch`, `run_watch`, `poll_once`, `Cursor` and
+`Event` are all re-exported, so `from imessage_chatdb import watch` is the
+generator function and `db.watch(...)` is the same thing.
 
 ### Poll yourself and persist the cursor
 
@@ -160,8 +183,14 @@ print(cursor)
 
 New messages get increasing `message.ROWID`s. A `Cursor` remembers the last
 ROWID delivered and advances only to the last message actually returned, so a
-crash between fetch and persist re-delivers rather than skips. Make your
-consumer idempotent on `rowid`.
+crash between fetch and persist re-delivers rather than skips. Each `Event`
+carries the cursor to persist after handling it (`event.cursor`); within a
+round, a `"new"` event's cursor is its own ROWID with the round's starting
+`edit_mark`, an `"edited"` event's cursor is the round's final ROWID with the
+largest `date_edited` seen so far (not counting its own value while a later
+event in the round still shares it — ties replay as a group), and the last
+event's cursor is the one `poll()` returns. Make your consumer idempotent on
+`rowid`.
 
 ### Edits via `date_edited`
 
@@ -220,7 +249,10 @@ parsed from `associated_message_guid`: `p:<part>/<GUID>`, `bp:<GUID>`
 `Message.reply_to_guid` is `thread_originator_guid`; after enrichment
 (the default) `Message.reply_to` is a `ReplyTarget` with the quoted message's
 cleaned, untruncated text (`''` for an attachment-only target), `is_from_me`
-and `sender_handle`.
+and `sender_handle`. `ReplyTarget.to_dict()` — the `reply_to` of
+`Message.to_dict()` — emits exactly those facts, `{"guid", "text",
+"is_from_me", "sender_handle"}`, never a `"You"`, an `"Attachment"`
+placeholder or a truncated preview; those strings are yours.
 
 ```python
 # doctest-fixture
@@ -295,13 +327,22 @@ chats in one query.
 
 ### Matching a chat by participants, with your own `key`
 
+> **Warning — the default `address_key` is North American.** It keeps the
+> **last 10 digits** of a phone number (the NANP national number), which
+> collides for international numbers that share their last ten digits
+> (`+44 20 7946 0958` and `+33 20 7946 0958` both become `2079460958`) and
+> mismatches a number whose national part is shorter than ten digits when it is
+> stored once with and once without its country code. Outside the NANP pass
+> your own `key=`; the one-liner that compares full digit strings is
+> `db.find_chat(addrs, key=lambda a: address_key(a) if "@" in a else "".join(ch for ch in a if ch.isdigit()))`.
+
 ```python
 # doctest-fixture
 import imessage_chatdb
 from imessage_chatdb import address_key
 
 db = imessage_chatdb.open(DB_PATH)
-match = db.find_chat(["+1 (555) 000-1234"])      # digits only, last 10 -> "5550001234"
+match = db.find_chat(["+1 (555) 000-1234"])      # digits only, last 10 -> "5550001234" (NANP!)
 print(match.chat_guid if match else None)
 
 ALIASES = {"test@example.invalid": "5550001234"}  # your own phone<->email merge
@@ -386,14 +427,15 @@ import imessage_chatdb
 from imessage_chatdb import CursorAhead
 
 db = imessage_chatdb.open()
-cursor = db.initial_cursor()
+cursor = load_cursor() or db.initial_cursor()    # your persistence; None on first run
 while True:
     try:
         for event in db.watch(cursor, interval=2.0):
             m = event.message
-            if event.kind != "new" or m.is_from_me or m.is_tapback or not m.clean_text:
-                continue
-            handle_incoming(m.chat_guid, m.sender_handle, m.clean_text)   # your code
+            if event.kind == "new" and not (m.is_from_me or m.is_tapback or not m.clean_text):
+                handle_incoming(m.chat_guid, m.sender_handle, m.clean_text)   # your code
+            cursor = event.cursor
+            save_cursor(cursor)               # after handling: at-least-once on restart
     except CursorAhead:
         cursor = db.initial_cursor()          # the database was rebuilt; start over at now
 ```
@@ -472,7 +514,8 @@ properties `is_plugin_payload`, `path`, `message_date_unix`; `exists()`;
 `to_dict()` -> `{"guid","mime_type","name","filename"}`.
 
 **`ReplyTarget`** — `guid, text (cleaned, untruncated, '' if none), is_from_me,
-sender_handle`; `to_dict()` -> `{"text": (text or "Attachment")[:120], "sender": "You" | handle}`.
+sender_handle`; `to_dict()` -> `{"guid", "text", "is_from_me", "sender_handle"}`
+(facts only: no `"You"`, no `"Attachment"`, no truncation).
 
 **`LiteMessage`** (`db.lite_messages`) — `rowid, text, is_from_me,
 associated_type, associated_emoji, has_attachments, sender_handle, attachments`:
@@ -494,7 +537,9 @@ chat_display_name, is_group, date, is_from_me, sender_handle, text, match_index`
 target_part, is_balloon`.
 
 **`Cursor`** — `rowid, edit_mark`; `to_json()` / `Cursor.from_json()`.
-**`Event`** — `kind ("new"|"edited")`, `message`.
+**`Event`** — `kind ("new"|"edited")`, `message`, `cursor` (the `Cursor` to
+persist once this event has been handled). All from `imessage_chatdb.polling`,
+re-exported with `poll_once`, `watch` and `run_watch`.
 
 Pure helpers: `apple_to_unix`, `unix_to_apple`, `apple_to_datetime`,
 `extract_text`, `effective_text`, `clean_text`, `parse_link_preview`,

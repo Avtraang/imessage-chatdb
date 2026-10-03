@@ -1,4 +1,4 @@
-"""Tests for ``watch.py`` (DESIGN.md 4.6, 8.4 watch, T8).
+"""Tests for ``polling.py`` (DESIGN.md 4.6, 8.4 watch, T8).
 
 Synthetic databases only.  ``poll_once`` is exercised directly and through
 ``ChatDB.poll``; ``watch``/``run_watch`` run with an injected ``sleep`` and a
@@ -19,15 +19,14 @@ import pytest
 import imessage_chatdb
 from imessage_chatdb.db import ChatDB
 from imessage_chatdb.errors import ChatDBBusy, CursorAhead
+from imessage_chatdb.polling import Cursor, Event, poll_once, run_watch, watch
 from imessage_chatdb.schema import Schema
-from imessage_chatdb.watch import Cursor, Event, poll_once, run_watch, watch
 from tests.conftest import FixtureDB, MakeDB, Pristine, sha256_of
 from tests.fixtures import builders as b
 
-# ``imessage_chatdb.watch`` is the *module*: the ``watch()`` generator is not
-# re-exported at package level (that would rebind the module attribute to a
-# function); callers use ``ChatDB.watch`` or ``imessage_chatdb.watch.watch``.
-watch_mod = importlib.import_module("imessage_chatdb.watch")
+# The polling code lives in ``imessage_chatdb.polling``; the package re-exports
+# its names, so ``imessage_chatdb.watch`` is the generator function itself.
+polling_mod = importlib.import_module("imessage_chatdb.polling")
 
 PHONE = "+15550001234"
 CHAT = "any;-;+15550001234"
@@ -80,11 +79,15 @@ def test_event_is_frozen_slotted(seeded: tuple[FixtureDB, int, int]) -> None:
     fx, _chat, first = seeded
     msg = fx.db.message(first)
     assert msg is not None
-    ev = Event("new", msg)
-    assert ev.kind == "new" and ev.message is msg
+    cur = Cursor(rowid=first, edit_mark=0)
+    ev = Event("new", msg, cur)
+    assert ev.kind == "new" and ev.message is msg and ev.cursor == cur
     with pytest.raises(dataclasses.FrozenInstanceError):
         ev.kind = "edited"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ev.cursor = Cursor()  # type: ignore[misc]
     assert not hasattr(ev, "__dict__")
+    assert [f.name for f in dataclasses.fields(Event)] == ["kind", "message", "cursor"]
 
 
 def test_public_names_exported() -> None:
@@ -92,13 +95,236 @@ def test_public_names_exported() -> None:
     assert imessage_chatdb.Event is Event
     assert imessage_chatdb.poll_once is poll_once
     assert imessage_chatdb.run_watch is run_watch
-    # the generator is reached through the module or the facade, never rebinds the module
-    assert imessage_chatdb.watch is watch_mod
-    assert imessage_chatdb.watch.watch is watch
-    assert imessage_chatdb.watch.poll_once is poll_once and imessage_chatdb.watch.Cursor is Cursor
-    assert "watch" not in imessage_chatdb.__all__
+    # the generator function is a package export; the module is ``polling``
+    assert imessage_chatdb.watch is watch
+    assert callable(imessage_chatdb.watch)
+    assert imessage_chatdb.polling is polling_mod
+    assert polling_mod.watch is watch
+    assert polling_mod.poll_once is poll_once and polling_mod.Cursor is Cursor
+    assert {"Cursor", "Event", "poll_once", "watch", "run_watch"} <= set(imessage_chatdb.__all__)
+    assert set(polling_mod.__all__) == {"Cursor", "Event", "poll_once", "watch", "run_watch"}
     assert ChatDB.watch.__doc__ is not None
-    assert "imessage_chatdb.watch.watch" in ChatDB.watch.__doc__
+    assert "imessage_chatdb.polling.watch" in ChatDB.watch.__doc__
+    # no shim is left behind
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("imessage_chatdb.watch")
+
+
+# ---------------------------------------------------------------------------
+# Event.cursor: the cursor to persist once that event has been handled
+# ---------------------------------------------------------------------------
+
+
+def test_new_events_carry_their_own_rowid_and_the_starting_mark(
+    seeded: tuple[FixtureDB, int, int],
+) -> None:
+    fx, chat, first = seeded
+    start = Cursor(rowid=first, edit_mark=EDIT_A)  # a non-zero starting mark
+    a = b.add_message(fx.writer, chat, text="one", handle=PHONE)
+    bb = b.add_message(fx.writer, chat, text="two", is_from_me=1)
+    c = b.add_message(fx.writer, chat, text="three", handle=PHONE)
+    events, cur = poll_once(fx.db, start)
+    assert [e.cursor for e in events] == [
+        Cursor(rowid=a, edit_mark=EDIT_A),
+        Cursor(rowid=bb, edit_mark=EDIT_A),
+        Cursor(rowid=c, edit_mark=EDIT_A),
+    ]
+    assert events[-1].cursor == cur
+
+
+def test_edited_events_carry_final_rowid_and_running_max_mark(
+    seeded: tuple[FixtureDB, int, int],
+) -> None:
+    fx, chat, first = seeded
+    second = b.add_message(fx.writer, chat, text="second", handle=PHONE)
+    start = Cursor(rowid=second, edit_mark=0)
+    # two edits with distinct marks: EDIT_A on ``second``, EDIT_B (later) on ``first``
+    b.set_date_edited(fx.writer, second, EDIT_A)
+    b.set_date_edited(fx.writer, first, EDIT_B)
+    new = b.add_message(fx.writer, chat, text="fresh", handle=PHONE)
+    events, cur = poll_once(fx.db, start)
+    assert _kinds(events) == ["new", "edited", "edited"]
+    assert _rowids(events) == [new, second, first]  # edits ascending by date_edited
+    assert [e.cursor for e in events] == [
+        Cursor(rowid=new, edit_mark=0),  # new: own rowid, the round's starting mark
+        Cursor(rowid=new, edit_mark=EDIT_A),  # edited: the round's final rowid, running max
+        Cursor(rowid=new, edit_mark=EDIT_B),
+    ]
+    assert events[-1].cursor == cur == Cursor(rowid=new, edit_mark=EDIT_B)
+
+
+def test_edited_event_mark_is_max_of_previous_and_its_own(
+    seeded: tuple[FixtureDB, int, int],
+) -> None:
+    fx, _chat, first = seeded
+    b.set_date_edited(fx.writer, first, EDIT_A)
+    # the starting mark is just below the edit: the event's mark is the edit's
+    events, cur = poll_once(fx.db, Cursor(rowid=first, edit_mark=EDIT_A - 1))
+    assert _kinds(events) == ["edited"]
+    assert events[0].cursor == Cursor(rowid=first, edit_mark=EDIT_A) == cur
+    assert events[0].message.date_edited == EDIT_A
+
+
+def test_last_event_cursor_equals_round_cursor_in_every_shape(
+    seeded: tuple[FixtureDB, int, int],
+) -> None:
+    fx, chat, first = seeded
+    # only new
+    n1 = b.add_message(fx.writer, chat, text="n1")
+    events, cur = poll_once(fx.db, Cursor(rowid=first))
+    assert _kinds(events) == ["new"] and events[-1].cursor == cur
+    # only edited
+    b.set_date_edited(fx.writer, first, EDIT_A)
+    events, cur = poll_once(fx.db, cur)
+    assert _kinds(events) == ["edited"] and events[-1].cursor == cur
+    # new + edited, include_edits=False
+    n2 = b.add_message(fx.writer, chat, text="n2")
+    b.set_date_edited(fx.writer, n1, EDIT_B)
+    events, cur2 = poll_once(fx.db, cur, include_edits=False)
+    assert _rowids(events) == [n2] and events[-1].cursor == cur2 == Cursor(n2, EDIT_A)
+    # the same round with edits
+    events, cur3 = poll_once(fx.db, cur)
+    assert _kinds(events) == ["new", "edited"] and events[-1].cursor == cur3
+    assert cur3 == Cursor(rowid=n2, edit_mark=EDIT_B)
+
+
+def test_resuming_from_a_mid_batch_event_cursor_replays_only_the_rest(
+    seeded: tuple[FixtureDB, int, int],
+) -> None:
+    """A crash after handling event k and persisting its cursor loses nothing."""
+    fx, chat, first = seeded
+    a = b.add_message(fx.writer, chat, text="a")
+    bb = b.add_message(fx.writer, chat, text="b")
+    c = b.add_message(fx.writer, chat, text="c")
+    b.set_date_edited(fx.writer, first, EDIT_A)
+    b.set_date_edited(fx.writer, a, EDIT_B)
+    events, cur = poll_once(fx.db, Cursor(rowid=first))
+    assert _kinds(events) == ["new", "new", "new", "edited", "edited"]
+    # persisted after the second "new" event: the third new and both edits come back
+    again, cur2 = poll_once(fx.db, Cursor.from_json(events[1].cursor.to_json()))
+    assert [(e.kind, e.message.rowid) for e in again] == [
+        ("new", c), ("edited", first), ("edited", a)
+    ]
+    assert cur2 == cur
+    # persisted after the first "edited" event: only the second edit comes back
+    again, cur3 = poll_once(fx.db, events[3].cursor)
+    assert [(e.kind, e.message.rowid) for e in again] == [("edited", a)]
+    assert cur3 == cur
+    # persisted after the last event: nothing comes back
+    assert poll_once(fx.db, events[-1].cursor) == ([], cur)
+    assert bb < c
+
+
+def test_tied_date_edited_checkpoint_replays_the_tie_instead_of_losing_it(
+    seeded: tuple[FixtureDB, int, int],
+) -> None:
+    """Two rows edited with the same raw date_edited: a checkpoint on the first
+    must not lose the second (the resume query is strict, ``> mark``)."""
+    fx, chat, m1 = seeded
+    m2 = b.add_message(fx.writer, chat, text="two", handle=PHONE)
+    start = Cursor(rowid=m2, edit_mark=0)
+    b.set_date_edited(fx.writer, m1, EDIT_A)
+    b.set_date_edited(fx.writer, m2, EDIT_A)
+    events, cur = poll_once(fx.db, start)
+    if not fx.db.schema.has("message", "date_edited"):
+        assert events == [] and cur == start
+        return
+    assert _kinds(events) == ["edited", "edited"]
+    assert {e.message.rowid for e in events} == {m1, m2}
+    # the tie's first member keeps the previous mark; only its last member passes it
+    assert events[0].cursor == Cursor(rowid=m2, edit_mark=0)
+    assert events[1].cursor == Cursor(rowid=m2, edit_mark=EDIT_A) == cur
+    # persisted after the first tied event, crashed: the whole tie comes back
+    again, cur2 = poll_once(fx.db, events[0].cursor)
+    assert {e.message.rowid for e in again} == {m1, m2} and cur2 == cur
+    # persisted after the second: nothing comes back
+    assert poll_once(fx.db, events[1].cursor) == ([], cur)
+
+
+def test_every_checkpoint_resumes_without_loss_with_ties(
+    seeded: tuple[FixtureDB, int, int],
+) -> None:
+    """Persist ``event.cursor`` after each event and crash there: the replay is
+    always a suffix of the round that covers every unhandled event, and any
+    re-delivered handled events are exactly the tied siblings of the last one."""
+    fx, chat, first = seeded
+    a = b.add_message(fx.writer, chat, text="a")
+    bb = b.add_message(fx.writer, chat, text="b")
+    c = b.add_message(fx.writer, chat, text="c")
+    b.set_date_edited(fx.writer, first, EDIT_A)
+    b.set_date_edited(fx.writer, a, EDIT_A)  # tie with ``first``
+    b.set_date_edited(fx.writer, bb, EDIT_B)
+    b.set_date_edited(fx.writer, c, EDIT_B)  # tie with ``bb``
+    events, cur = poll_once(fx.db, Cursor(rowid=first))
+    keys = [(e.kind, e.message.rowid) for e in events]
+    if not fx.db.schema.has("message", "date_edited"):
+        assert keys == [("new", a), ("new", bb), ("new", c)]
+    else:
+        assert keys[:3] == [("new", a), ("new", bb), ("new", c)]
+        assert sorted(keys[3:5]) == sorted([("edited", first), ("edited", a)])
+        assert sorted(keys[5:]) == sorted([("edited", bb), ("edited", c)])
+    marks = [e.message.date_edited or 0 if e.kind == "edited" else None for e in events]
+    for k, ev in enumerate(events):
+        again, cur2 = poll_once(fx.db, Cursor.from_json(ev.cursor.to_json()))
+        rest = [(e.kind, e.message.rowid) for e in again]
+        assert cur2 == cur
+        # a suffix of the round ...
+        j = len(keys) - len(rest)
+        assert rest == keys[j:], (k, rest)
+        # ... that never skips an unhandled event ...
+        assert j <= k + 1, (k, rest)
+        # ... and re-delivers only tied siblings of event k (at-least-once, grouped)
+        assert all(marks[i] == marks[k] for i in range(j, k + 1)), (k, rest)
+    assert poll_once(fx.db, events[-1].cursor) == ([], cur)
+
+
+def test_watch_events_carry_cursors_across_rounds(seeded: tuple[FixtureDB, int, int]) -> None:
+    fx, chat, first = seeded
+    stop = threading.Event()
+    sleeps = 0
+    added: list[int] = []
+
+    def fake_sleep(_s: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            added.append(b.add_message(fx.writer, chat, text="r1"))
+            added.append(b.add_message(fx.writer, chat, text="r1b"))
+        elif sleeps == 2:
+            b.set_date_edited(fx.writer, first, EDIT_A)
+        else:
+            stop.set()
+
+    got = list(fx.db.watch(Cursor(rowid=first), stop=stop, sleep=fake_sleep))
+    assert _kinds(got) == ["new", "new", "edited"]
+    assert [e.cursor for e in got] == [
+        Cursor(rowid=added[0], edit_mark=0),
+        Cursor(rowid=added[1], edit_mark=0),
+        Cursor(rowid=added[1], edit_mark=EDIT_A),
+    ]
+    # the README recipe: resume from the last persisted event cursor
+    assert poll_once(fx.db, Cursor.from_json(got[-1].cursor.to_json())) == ([], got[-1].cursor)
+
+
+def test_run_watch_events_carry_cursors_and_on_cursor_matches_last(
+    seeded: tuple[FixtureDB, int, int],
+) -> None:
+    fx, chat, first = seeded
+    stop = threading.Event()
+    a = b.add_message(fx.writer, chat, text="a")
+    c = b.add_message(fx.writer, chat, text="c")
+    events: list[Event] = []
+    cursors: list[Cursor] = []
+    run_watch(
+        fx.db,
+        events.append,
+        on_cursor=cursors.append,
+        cursor=Cursor(rowid=first),
+        stop=stop,
+        sleep=lambda _s: stop.set(),
+    )
+    assert [e.cursor for e in events] == [Cursor(rowid=a), Cursor(rowid=c)]
+    assert cursors == [events[-1].cursor]
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +478,7 @@ def test_busy_returns_no_events_and_same_cursor_monkeypatched(
         raise ChatDBBusy("database is locked")
 
     # busy mid-round (after MAX(ROWID) succeeded)
-    monkeypatch.setattr(watch_mod, "messages_after", busy)
+    monkeypatch.setattr(polling_mod, "messages_after", busy)
     assert poll_once(fx.db, start) == ([], start)
     # busy at open time
     monkeypatch.undo()

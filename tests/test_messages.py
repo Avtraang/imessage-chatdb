@@ -548,9 +548,11 @@ def test_reply_targets_cleaned_untruncated_and_empty_for_attachment_only(
     assert got["ATT-ONLY"].is_from_me is True and got["ATT-ONLY"].sender_handle is None
     assert got["BLOB"].text == "blob text"
     assert got["EMPTY"].text == ""
-    # the relay's fallback/truncation is a to_dict concern, not the model's
-    assert got["ATT-ONLY"].to_dict() == {"text": "Attachment", "sender": "You"}
-    assert len(got["LONG"].to_dict()["text"]) == 120
+    # the relay's "You"/"Attachment"/[:120] strings are the relay adapter's, not to_dict's
+    assert got["ATT-ONLY"].to_dict() == {
+        "guid": "ATT-ONLY", "text": "", "is_from_me": True, "sender_handle": None,
+    }
+    assert got["LONG"].to_dict()["text"] == got["LONG"].text  # untruncated
 
     stmts = _trace(conn)
     assert reply_targets(conn, []) == {}

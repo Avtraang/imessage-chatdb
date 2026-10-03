@@ -140,6 +140,24 @@ def test_address_key_exactly_ten_digits() -> None:
     assert address_key("5550001234") == "5550001234"
 
 
+def test_address_key_is_north_american_and_collides_on_international_numbers() -> None:
+    """The documented caveat: last-10-digits is NANP; non-NANP numbers collide/mismatch."""
+    import imessage_chatdb.handles as handles
+
+    # two different international numbers sharing their last ten digits collide
+    assert address_key("+44 20 7946 0958") == address_key("+33 20 7946 0958") == "2079460958"
+    # the same number with and without its country code keys differently once
+    # the national part alone is shorter than ten digits
+    assert address_key("+49 30 123456") != address_key("030 123456")
+    # the docstrings say so and show the escape hatch
+    assert handles.__doc__ is not None
+    assert "North American" in handles.__doc__ and "key=" in handles.__doc__
+    assert address_key.__doc__ is not None and "international" in address_key.__doc__
+    # the one-line override from the docs: compare full digit strings
+    full = lambda a: address_key(a) if "@" in a else "".join(ch for ch in a if ch.isdigit())  # noqa: E731
+    assert full("+44 20 7946 0958") != full("+33 20 7946 0958")
+
+
 def test_address_key_no_digits_is_empty_string() -> None:
     # A phone-style string with no digits reduces to '' (the relay's normalize_phone result).
     assert address_key("abc") == ""

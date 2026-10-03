@@ -39,13 +39,13 @@ Every objection from both judges is resolved in §13 with a one-line disposition
 
 ## 2. Verified facts the design rests on (macOS 27.0, SQLite WAL)
 
-- `attributedBody` begins `04 0B "streamtyped" 81 E8 03`. The text is one `+`-typed value: `84 01 2B <len> <utf-8>`. Length tags seen: one-byte (`< 0x80`) and `0x81`+u16le; zero `0x82`/`0x83` (largest text 9,966 bytes, largest blob 48,165 bytes). The byte after the string is `0x86` then `84 02 69 49` on 100% of blobs. Two root classes exist: plain `NSAttributedString` (~14.6k blobs) and `NSMutableAttributedString` (~6k). The relay reads **3** bytes after `0x82`; the spec and reference parsers read **4**. Latent bug, no live impact; the library reads 4 (and 8 for `0x83`).
-- `message`: name-based reads only (macOS 27 reordered the table and dropped all `sr_*`). `date_*` are INTEGER ns since 2001-01-01; `date_edited` is `0` (not NULL) on unedited rows. `text IS NULL` with a blob on ~17.6k of ~20.8k rows. 320 rows have no `chat_message_join` row (the relay's inner join hides them). No message is joined to more than one chat (0 rows).
-- `associated_message_type` seen: 0, 1000, 2000-2006, 3000-3002. Every 2006 row has `associated_message_emoji`. `associated_message_guid` forms: `p:<part>/<GUID>` (dominant), `bp:<GUID>` (78 rows, 11 of them emoji tapbacks), bare `<GUID>` (9 rows). `thread_originator_part` is TEXT.
+- `attributedBody` begins `04 0B "streamtyped" 81 E8 03`. The text is one `+`-typed value: `84 01 2B <len> <utf-8>`. Length tags seen: one-byte (`< 0x80`) and `0x81`+u16le; zero `0x82`/`0x83` (the largest text is under 10 KB, the largest blob under 50 KB). The byte after the string is `0x86` then `84 02 69 49` on every blob. Two root classes exist: plain `NSAttributedString` (most blobs) and `NSMutableAttributedString` (the rest, roughly a third). The relay reads **3** bytes after `0x82`; the spec and reference parsers read **4**. Latent bug, no live impact; the library reads 4 (and 8 for `0x83`).
+- `message`: name-based reads only (macOS 27 reordered the table and dropped all `sr_*`). `date_*` are INTEGER ns since 2001-01-01; `date_edited` is `0` (not NULL) on unedited rows. `text IS NULL` with a blob on most rows (tens of thousands). A few hundred rows have no `chat_message_join` row (the relay's inner join hides them). No message is joined to more than one chat (none).
+- `associated_message_type` seen: 0, 1000, 2000-2006, 3000-3002. Every 2006 row has `associated_message_emoji`. `associated_message_guid` forms: `p:<part>/<GUID>` (dominant), `bp:<GUID>` (a few dozen rows, some of them emoji tapbacks), bare `<GUID>` (a handful). `thread_originator_part` is TEXT.
 - `chat.style` ∈ {43 group, 45 one-to-one}; every `chat.guid` starts with `any;` so the relay's `guid.startswith("iMessage")` tie-break is a no-op here (kept verbatim for fidelity).
 - `message.service` ∈ {iMessage, SMS, RCS, iMessageLite}; `chat.service_name` ∈ {iMessage, SMS, RCS} and is a stale hint.
-- `attachment.filename`: `~/`-prefixed (6,132), absolute `/var/...` (166), NULL (228). 3,331 rows are `*.pluginPayloadAttachment`. `hide_attachment=1` = those 3,331 **plus 20 image/png rows that are not plugin payloads and are surfaced by the relay today**; all 29 stickers have `hide_attachment=0`. Therefore the default exclusion is the `transfer_name` suffix, never `hide_attachment`.
-- `immutable=1` ignores the WAL and misses fresh rows (KB line 236-237). `mode=ro` honours the WAL and needs the `-shm` file, which Messages.app keeps present.
+- `attachment.filename`: `~/`-prefixed (the vast majority, thousands), absolute `/var/...` (a few hundred), NULL (a few hundred). Roughly a third of the rows (thousands) are `*.pluginPayloadAttachment`. `hide_attachment=1` = those **plus a couple of dozen image/png rows that are not plugin payloads and are surfaced by the relay today**; all stickers (a few dozen) have `hide_attachment=0`. Therefore the default exclusion is the `transfer_name` suffix, never `hide_attachment`.
+- `immutable=1` ignores the WAL and misses fresh rows (a note in the original relay's own documentation). `mode=ro` honours the WAL and needs the `-shm` file, which Messages.app keeps present.
 - Full Disk Access is bound to the exact interpreter binary (`brew upgrade python` orphans it).
 
 ---
@@ -77,7 +77,7 @@ imessage-chatdb/
     chats.py                  chats_by_activity, chat, chat_by_rowid, participants, participants_map, chat_services,
                               last_rowid_for, unread_count, lite_messages, one_to_one_activity, find_chat
     search.py                 search, extract_urls, snippet
-    watch.py                  Cursor, Event, poll_once, watch, run_watch
+    polling.py                Cursor, Event, poll_once, watch, run_watch (all re-exported; `imessage_chatdb.watch` is the generator)
     db.py                     ChatDB facade (one connection per call; connection() for batching)
     __main__.py               python -m imessage_chatdb check|tail|chats|search
   tests/
@@ -91,7 +91,7 @@ imessage-chatdb/
     test_chats.py test_find_chat.py test_search.py test_watch.py test_cli.py test_fuzz.py
 ```
 
-Dependency direction: `dates`, `services`, `handles`, `reactions`, `typedstream`, `keyed_archive` <- `link_preview` are leaves; `models` imports leaves; `schema`/`sql` are leaves; `messages`/`attachments`/`chats`/`search` import `models`+`sql`+`schema`; `watch` imports `messages`; `db` imports everything. Nothing imports FastAPI, httpx, or anything outside the stdlib.
+Dependency direction: `dates`, `services`, `handles`, `reactions`, `typedstream`, `keyed_archive` <- `link_preview` are leaves; `models` imports leaves; `schema`/`sql` are leaves; `messages`/`attachments`/`chats`/`search` import `models`+`sql`+`schema`; `polling` imports `messages`; `db` imports everything. Nothing imports FastAPI, httpx, or anything outside the stdlib.
 
 ---
 
@@ -333,7 +333,11 @@ class Cursor:
     def to_json(self) -> dict; @classmethod def from_json(cls, d) -> "Cursor"
 
 @dataclass(frozen=True, slots=True)
-class Event: kind: Literal["new", "edited"]; message: Message
+class Event: kind: Literal["new", "edited"]; message: Message; cursor: Cursor
+    # cursor = what to persist once THIS event is handled: "new" -> Cursor(own rowid, round's starting mark);
+    # "edited" -> Cursor(round's final rowid, max(previous, raw date_edited)) -- but a row tied on date_edited with a
+    #   later row in the round keeps the previous mark (only the tie's last event passes the value; the resume query is
+    #   strict, so a checkpoint inside a tie replays the tie rather than skipping it); last event's cursor == poll_once's
 
 def poll_once(db: ChatDB, cursor: Cursor, *, include_edits: bool = True) -> tuple[list[Event], Cursor]:
     """One round. Rules:
@@ -403,7 +407,7 @@ class SearchHit: rowid: int; chat_rowid: int; chat_guid: str; chat_identifier: s
 
 ### 5.1 `Message.to_dict()` (library-native, for adopters and the CLI; **not** what the relay serves)
 
-Same keys and order as the relay's message dict, raw values: `sender` = `sender_handle`, `chat_name` = `display_name or chat_identifier`, dates as `apple_to_unix(...)`, attachments as `{"guid","mime_type","name","filename"}` (no `url` key — URLs are a caller concern), `link.image` = `image_url` (or `None` when only an embedded blob exists; fetch it with `db.link_image(rowid)`), `reply_to` = `{"text": (text or "Attachment")[:120], "sender": "You" if is_from_me else (sender_handle or "")}`. The adopter is told in the README that this is "the relay's shape without the relay's strings". The byte-identical shape lives only in the relay adapter (§7).
+Same keys and order as the relay's message dict, raw values: `sender` = `sender_handle`, `chat_name` = `display_name or chat_identifier`, dates as `apple_to_unix(...)`, attachments as `{"guid","mime_type","name","filename"}` (no `url` key — URLs are a caller concern), `link.image` = `image_url` (or `None` when only an embedded blob exists; fetch it with `db.link_image(rowid)`), `reply_to` = `ReplyTarget.to_dict()` = `{"guid", "text", "is_from_me", "sender_handle"}` (facts only, untruncated; the `or "Attachment"` / `[:120]` / `"You"` strings are `relay_reply`'s, §7). The adopter is told in the README that this is "the relay's shape without the relay's strings". The byte-identical shape lives only in the relay adapter (§7).
 
 ---
 
@@ -440,7 +444,7 @@ Statements kept verbatim in `sql.py` because their row order or row set is JSON-
 
 ### 6.2 `extract_text` and the 0x82 question
 
-The byte-scan locator is the relay's; there are two changes, both recorded in the CHANGELOG as knowing deviations. (1) Length tag handling: `0x82` reads **4** bytes (relay: 3), `0x83` reads 8, any other tag `>= 0x80` returns `None` instead of being used as a raw length. Zero `0x82` rows exist (largest text 9,966 bytes), so the relay's output cannot change today. (2) Truncation: a blob cut before the end of its text — in the header, in the length tag or its length bytes, or inside the text itself — decodes to `None`, never a partial string; a blob cut only in the `0x86` trailer after the text (the text is complete) decodes to the complete text, exactly as an intact blob would. That is the §8.2 pin; the relay returned the partial decode. Every live blob carries the `0x86` trailer after its text, so this is reachable only on a corrupt blob. The full typedstream reader (shared-string table `0x92+i`, `0x84` new / `0x85` nil / `0x86` end, UTF-16 run lengths for the attribute table) is v0.2 scope; when it lands, `extract_text` is its oracle on every well-formed blob.
+The byte-scan locator is the relay's; there are two changes, both recorded in the CHANGELOG as knowing deviations. (1) Length tag handling: `0x82` reads **4** bytes (relay: 3), `0x83` reads 8, any other tag `>= 0x80` returns `None` instead of being used as a raw length. Zero `0x82` rows exist (the largest text is under 10 KB), so the relay's output cannot change today. (2) Truncation: a blob cut before the end of its text — in the header, in the length tag or its length bytes, or inside the text itself — decodes to `None`, never a partial string; a blob cut only in the `0x86` trailer after the text (the text is complete) decodes to the complete text, exactly as an intact blob would. That is the §8.2 pin; the relay returned the partial decode. Every live blob carries the `0x86` trailer after its text, so this is reachable only on a corrupt blob. The full typedstream reader (shared-string table `0x92+i`, `0x84` new / `0x85` nil / `0x86` end, UTF-16 run lengths for the attribute table) is v0.2 scope; when it lands, `extract_text` is its oracle on every well-formed blob.
 
 ### 6.3 `parse_link_preview` (logic ported unchanged from the relay)
 
@@ -556,13 +560,13 @@ def find_chat_for_addresses(conn, addrs):
 |---|---|---|
 | `db()` 149-153 | `CDB.connect()` via the kept `db()` name | fresh connection per call; untouched endpoints keep `conn.close()` |
 | `apple_date_to_unix` 156-165 | `imessage_chatdb.apple_to_unix` | identical expression -> identical floats; 0/None -> None |
-| `parse_attributed_body` 168-186 | `extract_text` | deviations (§6.2): 0x82 = 4 bytes (0 live rows); truncated blob -> `None`, not a partial string (corrupt rows only) |
+| `parse_attributed_body` 168-186 | `extract_text` | deviations (§6.2): 0x82 = 4 bytes (no live rows); truncated blob -> `None`, not a partial string (corrupt rows only) |
 | contacts 189-260 | **stays** | — |
 | `MESSAGE_SELECT` 265-280 | `build_message_select(schema)` | same joins, same multiplicity, same ORDER suffixes |
 | `_deref`, `parse_link_preview` 287-381 | `parse_link_preview` + `relay_link` | precedence embedded blob > imageMetadata > string scan, via `has_embedded_image` first |
 | `row_to_msg` 384-409 | `row_to_message` + `relay_msg` | `effective_text`; `bool()`; `service_raw`; link only for `LINK_BALLOON` |
 | `resolve_replies` 412-437 | `reply_targets` (inside `enrich`) + `relay_reply` | clean -> `or "Attachment"` -> `[:120]` -> `"You"`/resolve/`""`, in that order |
-| `attachments_for` 440-460 | `attachments_for(include_plugin_payloads=False)` + `relay_att` | filter = `transfer_name` suffix (20 hidden-not-plugin rows keep flowing) |
+| `attachments_for` 440-460 | `attachments_for(include_plugin_payloads=False)` + `relay_att` | filter = `transfer_name` suffix (the couple of dozen hidden-not-plugin rows keep flowing) |
 | `enrich` 463-469 | `enrich` (default in every fetch) | attachments only for `has_attachments` rows; one IN query each |
 | `TAPBACK_VERBS`, `last_message_previews` 472-511 | **stays**, fed by `lite_messages` | strings unchanged; 2006 still falls through to text |
 | `fetch_new` / `max_rowid` / `max_date_edited` / `fetch_edited` 514-556 | wrappers above | `enrich=True`; raw-int mark, `max` of returned rows, never regresses |
@@ -689,7 +693,7 @@ Homepage = "https://github.com/Avtraang/imessage-chatdb"
 packages = ["src/imessage_chatdb"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["DESIGN.md"]       # internal design notes; never shipped
+exclude = ["/DESIGN.md"]      # design notes live in the repo, not in the distribution
 ```
 
 `src/imessage_chatdb/py.typed` ships. `CHANGELOG.md` 0.1.0 records the 0x82 deviation. No relay backups, state files, tokens, or real data may ever enter the repo (`.gitignore` covers `*.db`, `*.db-wal`, `*.db-shm`, `relay_state*`, `.env`).
@@ -729,7 +733,7 @@ Each task names the files it owns; no two tasks own the same file. "Done" always
 - **T7 chats + find_chat + search.** Owns `chats.py`, `search.py`, `test_chats.py`, `test_find_chat.py`, `test_search.py`. Inputs: §4.4, §6.4, §6.5, relay.py 559-702, 716-800 (SQL only), 1465-1522, 2077-2093. Done: §8.4 chats/find_chat/search pins pass; the "two addresses, one person" case takes the group branch; `chat_services` raises on a dropped table (the relay wrapper is what swallows it).
 
 **Wave 3 (parallel, after wave 2):**
-- **T8 db facade + watch.** Owns `db.py`, `watch.py`, `test_watch.py`, and fills `__init__.py` exports. Inputs: §4.1, §4.5, §4.6. Done: one connection per call (trace shows open/close per method); `poll`/`watch`/`run_watch` pins pass incl. busy and `CursorAhead`; `open()` convenience works.
+- **T8 db facade + watch.** Owns `db.py`, `polling.py`, `test_watch.py`, and fills `__init__.py` exports. Inputs: §4.1, §4.5, §4.6. Done: one connection per call (trace shows open/close per method); `poll`/`watch`/`run_watch` pins pass incl. busy and `CursorAhead`; `open()` convenience works.
 - **T9 CLI + fuzz + README + CHANGELOG.** Owns `__main__.py`, `test_cli.py`, `test_fuzz.py`, `README.md`, `CHANGELOG.md` content. Inputs: §4.7, §8.4 fuzz, §10. Done: JSON-lines output parses; fuzz passes; README sections 1-10 present with runnable snippets checked by a doctest-style smoke test against a fixture.
 
 **Wave 4 (sequential, in the relay repo, after T8; requires the owner's OK before any edit to `relay.py` or a LaunchAgent restart):**
@@ -749,7 +753,7 @@ Each task names the files it owns; no two tasks own the same file. "Done" always
 4. `mode=ro` needs an openable `-shm`; sandboxed callers get `ChatDBAccessError`. The relay starts on `readonly_uri=False` and flips after the gates.
 5. Full Disk Access is path-bound to the interpreter; the library can only explain.
 6. Cursor edges: rebuilt DB (`CursorAhead`), iCloud history downloads (old dates, new rowids — filter on `message.date`), edits synced with an older `date_edited` (missed; `date_updated` is a candidate universal mark, unverified, v0.2 experiment).
-7. Orphan rows (320) are hidden by the inner join; `include_orphans` is the escape hatch; Messages.app appears to write both rows in one transaction.
+7. Orphan rows (a few hundred) are hidden by the inner join; `include_orphans` is the escape hatch; Messages.app appears to write both rows in one transaction.
 8. Performance: `chats()` GROUP BY and `search`'s four `instr()` scans are O(messages); fine at 20k, documented for 500k+.
 9. Privacy: tests never touch real data; shadow diff prints counts/rowids only; the library never logs content; the repo contains no backups, state, or tokens.
 10. Scope discipline: v0.2 items (typedstream reader, parts, edit history, retraction events, `date_updated`) are listed so they do not creep into v0.1.
@@ -760,10 +764,10 @@ Each task names the files it owns; no two tasks own the same file. "Done" always
 
 | # | Objection (judge) | Disposition |
 |---|---|---|
-| 1 | `hide_attachment` ≈ plugin payloads + stickers is wrong; `include_hidden` would drop 20 live attachments (J1-1, J2-1) | **Accepted.** Default exclusion is `transfer_name.endswith(".pluginPayloadAttachment")` only; parameter is `include_plugin_payloads`; `Attachment` exposes both `is_plugin_payload` and `hide_attachment`; a fixture with a hidden-not-plugin PNG pins it. |
+| 1 | `hide_attachment` ≈ plugin payloads + stickers is wrong; `include_hidden` would drop a couple of dozen live attachments (J1-1, J2-1) | **Accepted.** Default exclusion is `transfer_name.endswith(".pluginPayloadAttachment")` only; parameter is `include_plugin_payloads`; `Attachment` exposes both `is_plugin_payload` and `hide_attachment`; a fixture with a hidden-not-plugin PNG pins it. |
 | 2 | P1's text rule and P2's `message_text` both diverge from `row_to_msg` on `""` edges (J1-2) | **Accepted.** `effective_text` is P3's statement verbatim; four-way `""`/`None` x blob test incl. failed decode -> `None`. |
 | 3 | P3's `message_json` emits `reply_to.text` without `or "Attachment"` / `[:120]` (J1-3, J2-5) | **Accepted.** `ReplyTarget.text` is cleaned and untruncated; `relay_reply` does `(r.text or "Attachment")[:120]`, the relay's order. |
-| 4 | `bp:` count / "87 bare" misstated (J1-4, J2-7) | **Accepted.** §2 records bp: 78 (11 emoji), bare 9; parser handles all three forms. |
+| 4 | `bp:` and bare-GUID counts misstated (J1-4, J2-7) | **Accepted.** §2 records bp: a few dozen (some emoji), bare: a handful; parser handles all three forms. |
 | 5 | "message in two chats happens" unverified (J1-5) | **Accepted.** Claim removed; 0 such rows; SQL semantics unchanged (would yield one object per join row). |
 | 6 | P1 folds `date_retracted` into the edit mark with unspecified ordering (J1-6, J2-11) | **Accepted.** No folding; retraction events are out of v0.1; `date_retracted` exposed as a field only. |
 | 7 | Previews via `hydrate=True` add work and move strings into the library (J1-7, J2-3) | **Accepted.** `lite_messages` returns facts with attachments only for `has_attachments` rows; all preview strings and the `att_public`-first HEIC rule stay in the relay. |

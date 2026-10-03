@@ -27,8 +27,8 @@ Homepage = "https://github.com/Avtraang/imessage-chatdb"
 packages = ["src/imessage_chatdb"]
 
 [tool.hatch.build.targets.sdist]
-# Internal design notes (local paths, the relay's private layout) never ship.
-exclude = []
+# Design notes live in the repo, not in the distribution.
+exclude = ["/DESIGN.md"]
 
 [tool.ruff]
 line-length = 100

@@ -665,22 +665,30 @@ def test_to_dict_link_shape() -> None:
     assert make_message(link=None).to_dict()["link"] is None
 
 
-def test_to_dict_reply_shape_fallback_truncation_and_sender() -> None:
+def test_to_dict_reply_is_facts_only_no_strings_no_truncation() -> None:
     long_text = "x" * 200
     d = make_message(
         reply_to_guid="SYN-MSG-000000",
         reply_to=ReplyTarget("SYN-MSG-000000", long_text, False, OTHER_PHONE),
     ).to_dict()
     assert d["reply_to_guid"] == "SYN-MSG-000000"
-    assert d["reply_to"] == {"text": "x" * 120, "sender": OTHER_PHONE}
-    assert list(d["reply_to"]) == ["text", "sender"]
-    # attachment-only target -> "Attachment"; outgoing -> "You"; NULL handle -> ""
+    assert d["reply_to"] == {
+        "guid": "SYN-MSG-000000",
+        "text": long_text,  # untruncated
+        "is_from_me": False,
+        "sender_handle": OTHER_PHONE,
+    }
+    assert list(d["reply_to"]) == ["guid", "text", "is_from_me", "sender_handle"]
+    # attachment-only target stays ''; outgoing is a bool; NULL handle stays None
     d2 = make_message(
         reply_to_guid="G", reply_to=ReplyTarget("G", "", True, None)
     ).to_dict()
-    assert d2["reply_to"] == {"text": "Attachment", "sender": "You"}
+    assert d2["reply_to"] == {"guid": "G", "text": "", "is_from_me": True, "sender_handle": None}
     d3 = make_message(reply_to_guid="G", reply_to=ReplyTarget("G", "", False, None)).to_dict()
-    assert d3["reply_to"] == {"text": "Attachment", "sender": ""}
+    assert d3["reply_to"] == {"guid": "G", "text": "", "is_from_me": False, "sender_handle": None}
+    # no presentation strings anywhere in the JSON
+    for doc in (d, d2, d3):
+        assert "You" not in json.dumps(doc) and "Attachment" not in json.dumps(doc)
     # unresolved reply: guid kept, reply_to None
     d4 = make_message(reply_to_guid="G", reply_to=None).to_dict()
     assert d4["reply_to_guid"] == "G"
@@ -798,13 +806,19 @@ def test_attachment_to_dict() -> None:
 
 
 def test_reply_target_to_dict() -> None:
-    assert ReplyTarget("G", "hello", False, PHONE).to_dict() == {"text": "hello", "sender": PHONE}
-    assert ReplyTarget("G", "hello", True, PHONE).to_dict() == {"text": "hello", "sender": "You"}
-    assert ReplyTarget("G", "", False, None).to_dict() == {"text": "Attachment", "sender": ""}
-    assert ReplyTarget("G", "y" * 121, False, None).to_dict()["text"] == "y" * 120
-    assert ReplyTarget("G", "y" * 120, False, None).to_dict()["text"] == "y" * 120
-    # the model itself stays untruncated
+    assert ReplyTarget("G", "hello", False, PHONE).to_dict() == {
+        "guid": "G", "text": "hello", "is_from_me": False, "sender_handle": PHONE,
+    }
+    assert ReplyTarget("G", "hello", True, PHONE).to_dict() == {
+        "guid": "G", "text": "hello", "is_from_me": True, "sender_handle": PHONE,
+    }
+    assert ReplyTarget("G", "", False, None).to_dict() == {
+        "guid": "G", "text": "", "is_from_me": False, "sender_handle": None,
+    }
+    # never truncated, in the dict or on the model
+    assert ReplyTarget("G", "y" * 121, False, None).to_dict()["text"] == "y" * 121
     assert len(ReplyTarget("G", "y" * 121, False, None).text) == 121
+    assert json.dumps(ReplyTarget("G", "", True, None).to_dict())  # JSON-ready
 
 
 def test_lite_message_and_chat_match_construct_positionally() -> None:

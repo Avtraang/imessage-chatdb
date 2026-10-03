@@ -25,8 +25,8 @@ from imessage_chatdb.connection import open_connection
 from imessage_chatdb.db import ChatDB, open
 from imessage_chatdb.errors import ChatDBAccessError, ChatDBBusy
 from imessage_chatdb.link_preview import LINK_BALLOON, embedded_image
+from imessage_chatdb.polling import Cursor
 from imessage_chatdb.schema import Schema
-from imessage_chatdb.watch import Cursor
 from tests.conftest import FixtureDB, MakeDB, Pristine, sha256_of
 from tests.fixtures import builders as b
 from tests.fixtures.keyed_archive_writer import make_link_payload
@@ -633,33 +633,32 @@ def test_design_4_3_names_are_exported() -> None:
         "Message", "Attachment", "ReplyTarget", "LiteMessage", "Chat", "ChatSummary",
         "ChatMatch", "SearchHit",
         "ChatDBError", "ChatDBAccessError", "ChatDBBusy", "CursorAhead", "SchemaError",
-        "Cursor", "Event", "poll_once", "run_watch",
+        "Cursor", "Event", "poll_once", "watch", "run_watch",
         "ChatDB", "open_connection", "DEFAULT_CHATDB",
         "Schema", "REQUIRED", "OPTIONAL", "build_message_select",
         "__version__",
     }
     assert expected <= set(imessage_chatdb.__all__)
-    # deliberately attributes but not exports: ``open`` (would shadow the builtin under
-    # ``import *``) and the ``watch()`` generator (would shadow the ``watch`` submodule)
-    assert "open" not in imessage_chatdb.__all__ and "watch" not in imessage_chatdb.__all__
+    # deliberately an attribute but not an export: ``open`` (would shadow the builtin
+    # under ``import *``); ``watch`` is the generator function and IS exported
+    assert "open" not in imessage_chatdb.__all__
     assert imessage_chatdb.open is open
 
 
-def test_star_import_does_not_shadow_builtin_open_or_watch_module() -> None:
+def test_star_import_does_not_shadow_builtin_open_and_exports_watch() -> None:
     import builtins
 
     namespace: dict[str, Any] = {}
     exec("from imessage_chatdb import *", namespace)  # noqa: S102 - our own package
     assert "open" not in namespace, "import * must not replace builtins.open"
-    assert "watch" not in namespace
     assert namespace["ChatDB"] is ChatDB and namespace["Cursor"] is Cursor
     assert builtins.open is not open
-    # the submodule stays reachable by attribute, with its own names intact
-    import imessage_chatdb.watch as watch_module
+    # the polling module is ``imessage_chatdb.polling``; ``watch`` is its generator
+    import imessage_chatdb.polling as polling_module
 
-    assert imessage_chatdb.watch is watch_module
-    assert watch_module.Cursor is Cursor and callable(watch_module.poll_once)
-    assert callable(watch_module.watch)
+    assert imessage_chatdb.polling is polling_module
+    assert namespace["watch"] is polling_module.watch is imessage_chatdb.watch
+    assert polling_module.Cursor is Cursor and callable(polling_module.poll_once)
 
 
 def test_open_rejects_a_sqlite_file_that_is_not_chat_db(

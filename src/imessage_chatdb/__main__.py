@@ -12,6 +12,11 @@ Every subcommand takes ``--db PATH`` (default ``~/Library/Messages/chat.db``).
 ``Message.to_dict()`` / ``ChatSummary.to_dict()`` / ``SearchHit.to_dict()``;
 ``check`` prints one JSON object describing the database.
 
+Privacy: ``tail``, ``chats`` and ``search`` print message content (text,
+handles, chat names) to stdout as JSON lines, so do not point them at a log
+file or a remote pipe; the library itself never logs or prints message
+content.  ``check`` prints only the path, profile and max ROWID.
+
 Exit codes: 0 success; 1 any other ``ChatDBError`` (busy, schema); 2 the
 database could not be opened (``ChatDBAccessError``: the message, which names
 the path and the interpreter binary that needs Full Disk Access, goes to
@@ -58,6 +63,14 @@ EXIT_INTERRUPTED = 130
 DEFAULT_CHATS_LIMIT = 200
 DEFAULT_SEARCH_LIMIT = 30
 DEFAULT_FOLLOW_INTERVAL = 2.0
+
+#: Shown by ``--help`` (main, ``tail``, ``chats`` and ``search``): the only
+#: place the library prints message content (``chats`` prints handles and
+#: chat names, which count).
+PRIVACY_NOTE = (
+    "privacy: tail, chats and search print message content (text, handles, chat names) "
+    "to stdout as JSON lines; do not point them at a log file or a remote pipe."
+)
 
 
 class UsageError(SystemExit):
@@ -106,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="python -m imessage_chatdb",
         description="Read-only JSON-lines access to an Apple Messages chat.db.",
+        epilog=PRIVACY_NOTE,
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
@@ -119,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         "tail",
         parents=[common],
         help="print messages with ROWID > N (default: start at now, like watch())",
+        epilog=PRIVACY_NOTE,
     )
     tail.add_argument(
         "--since-rowid",
@@ -148,7 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     chats = sub.add_parser(
-        "chats", parents=[common], help="list chats, most recent activity first"
+        "chats",
+        parents=[common],
+        help="list chats, most recent activity first",
+        epilog=PRIVACY_NOTE,
     )
     chats.add_argument(
         "--limit",
@@ -158,7 +176,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"maximum number of chats (default: {DEFAULT_CHATS_LIMIT})",
     )
 
-    srch = sub.add_parser("search", parents=[common], help="search message text, newest first")
+    srch = sub.add_parser(
+        "search", parents=[common], help="search message text, newest first", epilog=PRIVACY_NOTE
+    )
     srch.add_argument("text", metavar="TEXT", help="text to search for (case-insensitive)")
     srch.add_argument(
         "--limit",

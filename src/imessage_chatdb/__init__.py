@@ -2,18 +2,17 @@
 
 The public surface of DESIGN.md section 4: :func:`open` / :class:`ChatDB`
 (section 4.1, 4.5), the schema (4.2), the pure functions and constants (4.3),
-the models (5), the errors (6.6) and the watching primitives (4.6).  The query
+the models (5), the errors (6.6) and the polling primitives (4.6).  The query
 functions that take a connection (section 4.4) live on their submodules
 (``imessage_chatdb.messages``, ``.attachments``, ``.chats``, ``.search``) and
 behind the same names on :class:`ChatDB`.
 
-Two names are deliberately kept off ``__all__`` / the package namespace:
-
-- ``imessage_chatdb.open`` exists (``imessage_chatdb.open(path)``) but is not in
-  ``__all__``, so ``from imessage_chatdb import *`` never shadows the builtin.
-- the ``watch()`` generator is reached as :meth:`ChatDB.watch` or
-  ``imessage_chatdb.watch.watch``; re-exporting it here would rebind the
-  ``imessage_chatdb.watch`` *module* attribute to a function.
+One name is deliberately kept off ``__all__``: ``imessage_chatdb.open``
+exists (``imessage_chatdb.open(path)``) but is not exported, so
+``from imessage_chatdb import *`` never shadows the builtin.  The polling
+primitives live in ``imessage_chatdb.polling`` and are re-exported here, so
+``imessage_chatdb.watch`` *is* the ``watch()`` generator (also reachable as
+:meth:`ChatDB.watch`).
 
 Nothing here opens a database at import time.
 """
@@ -46,12 +45,12 @@ from .models import (
     ReplyTarget,
     SearchHit,
 )
+from .polling import Cursor, Event, poll_once, run_watch, watch
 from .reactions import Reaction, classify_reaction, parse_associated_guid
 from .schema import OPTIONAL, REQUIRED, Schema, build_message_select
 from .search import extract_urls, snippet
 from .services import Service, normalize_service, service_family
 from .typedstream import clean_text, effective_text, extract_text
-from .watch import Cursor, Event, poll_once, run_watch
 
 __version__ = "0.1.0"
 
@@ -115,9 +114,10 @@ __all__ = [
     "ChatSummary",
     "ChatMatch",
     "SearchHit",
-    # watching (the generator itself: ``ChatDB.watch`` / ``imessage_chatdb.watch.watch``)
+    # polling (``imessage_chatdb.polling``)
     "Cursor",
     "Event",
     "poll_once",
+    "watch",
     "run_watch",
 ]

@@ -41,9 +41,9 @@ from .models import (
     ReplyTarget,
     SearchHit,
 )
+from .polling import Cursor, Event, poll_once
+from .polling import watch as _watch
 from .schema import Schema
-from .watch import Cursor, Event, poll_once
-from .watch import watch as _watch
 
 __all__ = ["ChatDB", "open"]
 
@@ -314,7 +314,7 @@ class ChatDB:
     # -- watching -----------------------------------------------------------
 
     def poll(self, cursor: Cursor, *, include_edits: bool = True) -> tuple[list[Event], Cursor]:
-        """One polling round (:func:`imessage_chatdb.watch.poll_once`)."""
+        """One polling round (:func:`imessage_chatdb.polling.poll_once`)."""
         return poll_once(self, cursor, include_edits=include_edits)
 
     def watch(
@@ -326,7 +326,7 @@ class ChatDB:
         include_edits: bool = True,
         sleep: Callable[[float], object] = time.sleep,
     ) -> Iterator[Event]:
-        """Yield events forever (:func:`imessage_chatdb.watch.watch`)."""
+        """Yield events forever (:func:`imessage_chatdb.polling.watch`)."""
         return _watch(
             self, cursor, interval=interval, stop=stop, include_edits=include_edits, sleep=sleep
         )

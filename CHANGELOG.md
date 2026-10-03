@@ -22,9 +22,7 @@ relay byte-for-byte.
   check the required
   columns, so a SQLite file that is not a Messages database raises
   `SchemaError` up front. `imessage_chatdb.open` is an attribute but not in
-  `__all__` (a star import never shadows the builtin), and the `watch()`
-  generator is `ChatDB.watch` / `imessage_chatdb.watch.watch` so the `watch`
-  submodule stays reachable by attribute.
+  `__all__` (a star import never shadows the builtin).
 - Errors: `ChatDBError`, `ChatDBAccessError` (`"<path>: <sqlite message>.
   <advice>"` in both open modes; the advice names `sys.executable` and the
   Full Disk Access pane, with the Homebrew-upgrade trap; `path`, `reason` and
@@ -51,10 +49,20 @@ relay byte-for-byte.
   branch; otherwise exact participant-set match in the group branch).
 - Search: NUL-safe `instr()` search over `attributedBody` with a Python
   recheck on the decoded text; `extract_urls`, `snippet`.
-- Watching: frozen `Cursor(rowid, edit_mark)` with JSON round-trip, `Event`,
-  `poll_once` (at-least-once; busy -> no events, nothing advanced; `new`
-  before `edited`; `CursorAhead` on a rebuilt database), `watch()` generator,
-  `run_watch()` with `on_cursor` persistence hook.
+- Polling (`imessage_chatdb.polling`; `Cursor`, `Event`, `poll_once`,
+  `watch`, `run_watch` are all package exports, so `from imessage_chatdb
+  import watch` is the generator function and `ChatDB.watch` the same thing):
+  frozen `Cursor(rowid, edit_mark)` with JSON round-trip; `Event(kind,
+  message, cursor)` where `cursor` is the `Cursor` to persist once that event
+  has been handled (`"new"`: its own ROWID with the round's starting mark;
+  `"edited"`: the round's final ROWID with the largest `date_edited` so far,
+  where rows tied on `date_edited` advance the mark only on the tie's last
+  event so a checkpoint inside a tie replays the tie instead of skipping its
+  rest; the last event's cursor equals the one `poll_once` returns), so a
+  `watch()` consumer that checkpoints after each event resumes with
+  at-least-once delivery; `poll_once` (busy -> no events, nothing advanced; `new` before
+  `edited`; `CursorAhead` on a rebuilt database), `watch()` generator,
+  `run_watch()` with the per-round `on_cursor` persistence hook.
 - Decoders (never raise): `extract_text` (typedstream byte-scan),
   `effective_text` (the relay's text rule, exactly), `clean_text`;
   `KeyedArchive` (plistlib + UID dereference with a visited set),
@@ -66,11 +74,16 @@ relay byte-for-byte.
   `Reaction` for tapbacks 2000-2006 / 3000-3006 / 1000 incl. macOS 26+
   `associated_message_emoji`; `parse_associated_guid` for `p:`, `bp:` and
   bare GUID forms; `Service` enum, `normalize_service`, `service_family`;
-  `address_key`, `is_email`, `is_group_style`.
+  `address_key` (documented as North American: the last 10 digits, which
+  collides or mismatches on international numbers — pass `find_chat` your own
+  `key=`), `is_email`, `is_group_style`.
 - Models: frozen slotted dataclasses `Message`, `Attachment`, `ReplyTarget`,
   `LiteMessage`, `Chat`, `ChatSummary`, `ChatMatch`, `SearchHit` with raw
   Apple dates, `*_unix` / `datetime` properties and `to_dict()` in the relay's
-  key order with raw values.
+  key order with raw values; `ReplyTarget.to_dict()` (the `reply_to` of
+  `Message.to_dict()`) is facts only — `{"guid", "text", "is_from_me",
+  "sender_handle"}`, untruncated, no `"You"` / `"Attachment"` strings (those
+  are built by the relay's adapter).
 - CLI: `python -m imessage_chatdb check | tail [--since-rowid N] [--follow]
   [--limit N] [--interval S] | chats [--limit N] | search TEXT [--limit N]`,
   `--db PATH` on every subcommand, JSON-lines output; exit codes 0 ok, 1
@@ -80,13 +93,17 @@ relay byte-for-byte.
   early by its reader (`tail ... | head -1`) ends the command quietly with
   exit 0 (the broken descriptor is pointed at `os.devnull` so the interpreter's
   shutdown flush cannot fail again); `main(argv)` returns the code and never
-  raises `SystemExit`.
+  raises `SystemExit`. `tail` and `search` print message content to stdout
+  as JSON lines (the only place the library does), which `--help`, the module
+  docstring and the README say not to point at a log or a remote pipe.
 - Tests: four schema profiles built under `tmp_path` only (the suite refuses
   `~/Library`); `attributedBody` and `payload_data` writers that reproduce the
   live byte layouts; WAL-vs-`immutable` and lock-contention tests; 2,000-
   iteration seeded fuzzing of every decoder with random bytes, bit-flipped
   valid blobs and random-UID plists; README snippets executed against a
   fixture.
+- Packaging: `DESIGN.md` (the design notes, kept in the repository) is
+  excluded from the sdist; `README.md`, `LICENSE` and `py.typed` ship.
 
 ### Known deviations from the relay
 
@@ -94,7 +111,7 @@ relay byte-for-byte.
   the relay read 3. `0x83` is read as 8 bytes; any other tag `>= 0x80` yields
   `None` instead of being used as a raw length. This is the spec-correct
   reading. No live row uses `0x82` or `0x83` (the longest observed text is
-  9,966 bytes and `0x81` + u16 covers up to 65,535), so the relay's output
+  under 10 KB and `0x81` + u16 covers up to 65,535), so the relay's output
   cannot change today; the case is exercised synthetically.
 - **A truncated `attributedBody` decodes to `None`, not a partial string.**
   The rule, pinned by the truncation-prefix tests at every byte offset: a blob

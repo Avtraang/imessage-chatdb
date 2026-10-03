@@ -141,15 +141,19 @@ class ReplyTarget:
     sender_handle: str | None
 
     def to_dict(self) -> dict[str, Any]:
-        """Relay ``reply_to`` shape with raw handles: ``text, sender``.
+        """Facts only: ``{"guid", "text", "is_from_me", "sender_handle"}``.
 
-        ``text`` is ``(text or "Attachment")[:120]`` and ``sender`` is ``"You"``
-        for outgoing targets, else the raw ``sender_handle`` (``''`` when NULL)
-        -- the order of operations the relay uses (section 5.1).
+        ``text`` is the cleaned, **untruncated** text (``''`` for an
+        attachment-only target) and ``sender_handle`` the raw handle (``None``
+        for outgoing).  No ``"You"``, no ``"Attachment"``, no ``[:120]`` -- those
+        are the relay adapter's strings (section 5.1), built on top of these
+        facts, never emitted here.
         """
         return {
-            "text": (self.text or "Attachment")[:120],
-            "sender": "You" if self.is_from_me else (self.sender_handle or ""),
+            "guid": self.guid,
+            "text": self.text,
+            "is_from_me": self.is_from_me,
+            "sender_handle": self.sender_handle,
         }
 
 
@@ -274,7 +278,9 @@ class Message:
         ``sender`` is the raw handle (same as ``sender_handle``); ``chat_name``
         is ``display_name or chat_identifier``; attachments are
         ``Attachment.to_dict()`` (no ``url``); ``link.image`` is ``image_url``;
-        ``reply_to`` is ``ReplyTarget.to_dict()``; ``service`` is ``service_raw``.
+        ``reply_to`` is ``ReplyTarget.to_dict()`` (``guid, text, is_from_me,
+        sender_handle``: facts, no fallback strings); ``service`` is
+        ``service_raw``.
         """
         return {
             "rowid": self.rowid,

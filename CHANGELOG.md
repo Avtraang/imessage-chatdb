@@ -4,7 +4,7 @@ All notable changes to `imessage-chatdb` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-10-03
 
 First release: the chat.db reading code extracted from a private iMessage
 relay into a stdlib-only, read-only, typed library whose results feed that

@@ -1,5 +1,7 @@
 # imessage-chatdb
 
+[![CI](https://github.com/Avtraang/imessage-chatdb/actions/workflows/ci.yml/badge.svg)](https://github.com/Avtraang/imessage-chatdb/actions/workflows/ci.yml)
+
 Read-only, standard-library-only reader for Apple Messages' `chat.db`
 (`~/Library/Messages/chat.db`). Open the database safely, tail new messages
 from a ROWID cursor, detect edits, decode `attributedBody`, classify tapbacks,

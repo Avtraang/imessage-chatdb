@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "imessage-chatdb"
+version = "0.1.0"
+description = "Read-only, stdlib-only reader for Apple Messages chat.db: messages, edits, tapbacks, replies, link previews, attachments, chats, search, polling."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: MacOS",
+  "License :: OSI Approved :: MIT License",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+
+[project.urls]
+Homepage = "https://github.com/Avtraang/imessage-chatdb"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/imessage_chatdb"]
+
+[tool.hatch.build.targets.sdist]
+# Internal design notes (local paths, the relay's private layout) never ship.
+exclude = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,25 @@
+# Real or scratch Messages databases must never enter the repo
+*.db
+*.db-wal
+*.db-shm
+
+# Relay state and secrets
+relay_state*
+.env
+
+# Internal design notes: cite the owner's local paths and the private relay's
+# layout, so they stay on disk but out of git (and out of the sdist, see
+# pyproject.toml).
+
+# Environments and caches
+.venv*/
+__pycache__/
+*.pyc
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# macOS
+.DS_Store

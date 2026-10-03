@@ -33,7 +33,9 @@ Project home: <https://github.com/Avtraang/imessage-chatdb> · Python >= 3.12 ·
 - cross-platform. Everything but the default path works anywhere SQLite does
   (the test-suite runs on Linux), but the database only exists on a Mac.
 
-## 2. Install and Full Disk Access (30 seconds) The only system requirement is that one-time Full Disk Access grant: System Integrity Protection (SIP) stays on, nothing is injected into Messages, and no private API is used — reading a file is all this library does.
+## 2. Install and Full Disk Access (30 seconds)
+
+The only system requirement is a one-time Full Disk Access grant for your Python. System Integrity Protection (SIP) stays on: nothing is injected into Messages and no private API is used. Reading a file is all this library does.
 
 ```sh
 pip install imessage-chatdb

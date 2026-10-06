@@ -12,6 +12,7 @@ import dataclasses
 import io
 import json
 import random
+
 # Wall-clock bounds in this module exist to catch hangs and quadratic blow-ups
 # (which take minutes), not to benchmark: they are set an order of magnitude
 # above what a laptop needs so shared CI runners never trip them.

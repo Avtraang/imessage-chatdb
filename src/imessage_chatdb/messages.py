@@ -32,8 +32,10 @@ from .sql import (
     AFTER_ROWID_SUFFIX,
     EDITED_AFTER_SUFFIX,
     MAX_DATE_EDITED,
+    MAX_DATE_RETRACTED,
     MAX_ROWID,
     REPLY_TARGETS,
+    RETRACTED_AFTER_SUFFIX,
     THREAD_BEFORE_SUFFIX,
     THREAD_ORDER_SUFFIX,
     THREAD_WHERE_SUFFIX,
@@ -45,8 +47,10 @@ __all__ = [
     "row_to_message",
     "messages_after",
     "messages_edited_after",
+    "messages_retracted_after",
     "max_rowid",
     "max_date_edited",
+    "max_date_retracted",
     "thread_messages",
     "recent_messages",
     "message",
@@ -90,7 +94,8 @@ def row_to_message(r: sqlite3.Row) -> Message:
     """Build a ``Message`` from one row of :func:`build_message_select`.
 
     - ``text`` is ``effective_text(m.text, m.attributedBody)``; ``text_column``
-      keeps the raw column.
+      keeps the raw column and ``attributed_body_raw`` the raw blob (so
+      ``Message.body`` / ``.parts`` can parse it lazily).
     - ``is_from_me`` and ``has_attachments`` are ``bool()``-ed.
     - ``link`` is parsed only when ``balloon_bundle_id == LINK_BALLOON``
       (so it is always ``None`` when the schema lacks the column).
@@ -107,11 +112,13 @@ def row_to_message(r: sqlite3.Row) -> Message:
         link = parse_link_preview(_opt(r, keys, "payload_data"))
     text_column = r["text"]
     body = r["attributed_body"]
+    raw = bytes(body) if isinstance(body, (bytes, bytearray, memoryview)) else None
     return Message(
         rowid=int(r["rowid"]),
         guid=str(r["guid"]),
         text=effective_text(text_column, body),
         text_column=text_column,
+        attributed_body_raw=raw,
         date=int(r["date"] or 0),
         date_read=_opt_int(r, keys, "date_read"),
         date_delivered=_opt_int(r, keys, "date_delivered"),
@@ -227,6 +234,15 @@ def max_date_edited(conn: sqlite3.Connection, schema: Schema) -> int:
     return int(value) if value else 0
 
 
+def max_date_retracted(conn: sqlite3.Connection, schema: Schema) -> int:
+    """``MAX(date_retracted)`` as a raw Apple int, or ``0`` (also when the column is absent)."""
+    if not schema.has("message", "date_retracted"):
+        return 0
+    rows = conn.execute(MAX_DATE_RETRACTED).fetchall()
+    value = rows[0]["m"] if rows else None
+    return int(value) if value else 0
+
+
 # ---------------------------------------------------------------------------
 # fetches
 # ---------------------------------------------------------------------------
@@ -278,6 +294,36 @@ def messages_edited_after(
         de = r["date_edited"]
         if de and int(de) > new_mark:
             new_mark = int(de)
+    return _finish(conn, rows, enrich), new_mark
+
+
+def messages_retracted_after(
+    conn: sqlite3.Connection,
+    schema: Schema,
+    mark: int,
+    *,
+    enrich: bool = True,
+) -> tuple[list[Message], int]:
+    """Messages whose raw ``date_retracted`` is past ``mark``, ascending by ``date_retracted``.
+
+    The unsend counterpart of :func:`messages_edited_after`, same contract:
+    ``(messages, new_mark)`` where ``new_mark`` is the largest raw
+    ``date_retracted`` seen and never less than ``mark``; ``([], mark)`` when
+    the schema has no ``date_retracted`` (macOS before 26).  Each message is
+    the row *as it is now*: an unsent message keeps its row with
+    ``date_retracted`` set, and Messages.app is reported to clear its text, so
+    ``text`` is typically ``None`` -- callers remove or mark the message, they
+    do not look for its content here.
+    """
+    if not schema.has("message", "date_retracted"):
+        return [], mark
+    q = build_message_select(schema) + RETRACTED_AFTER_SUFFIX
+    rows = conn.execute(q, (mark,)).fetchall()
+    new_mark = mark
+    for r in rows:
+        dr = r["date_retracted"]
+        if dr and int(dr) > new_mark:
+            new_mark = int(dr)
     return _finish(conn, rows, enrich), new_mark
 
 

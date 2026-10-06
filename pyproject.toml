@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "imessage-chatdb"
-version = "0.1.1"
+version = "0.2.0"
 description = "Read-only, stdlib-only reader for Apple Messages chat.db: messages, edits, tapbacks, replies, link previews, attachments, chats, search, polling."
 readme = "README.md"
 license = "MIT"

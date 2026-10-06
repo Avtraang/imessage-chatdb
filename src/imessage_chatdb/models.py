@@ -17,7 +17,7 @@ relay JSON is produced by the adapter inside the relay, not here.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,7 @@ from .link_preview import LinkPreview
 from .reactions import Reaction, classify_reaction
 from .services import Service, normalize_service
 from .typedstream import clean_text as _clean_text
+from .typedstream_reader import AttributedBody, Part, message_parts, try_parse_attributed_body
 
 __all__ = [
     "GROUP_STYLE",
@@ -37,6 +38,7 @@ __all__ = [
     "Chat",
     "ChatSummary",
     "ChatMatch",
+    "ChatActivity",
     "SearchHit",
 ]
 
@@ -48,6 +50,18 @@ GROUP_STYLE = 43
 #: ``attachments_for``).  Duplicated from ``attachments.py`` because that module
 #: imports this one.
 PLUGIN_PAYLOAD_SUFFIX = ".pluginPayloadAttachment"
+
+
+class _Unset:
+    """Sentinel type for the not-yet-computed ``Message.body`` / ``.parts`` caches."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_UNSET = _Unset()
 
 
 def _link_dict(link: LinkPreview | None) -> dict[str, Any] | None:
@@ -172,6 +186,15 @@ class Message:
     ``messages_after(..., include_orphans=True)`` (a ``message`` row with no
     ``chat_message_join`` row); every other fetch inner-joins the chat.
 
+    ``attributed_body_raw`` (0.2) is the raw ``attributedBody`` blob the row
+    carried (``None`` when NULL); ``body`` parses it with the full typedstream
+    reader on first access and ``parts`` splits the result into text and
+    attachment parts.  Both are cached on the instance and never raise: a
+    blob the reader rejects gives ``body is None`` and ``parts == ()`` while
+    ``text`` (the byte-scan) may still be set.  ``body.text`` differs from
+    ``text`` only when ``text_column`` is non-empty, because the column wins
+    in ``effective_text``.  ``to_dict()`` is unchanged: no new key.
+
     Keyword-only: with ~40 fields positional construction is never intended.
     """
 
@@ -210,8 +233,42 @@ class Message:
     is_spam: bool | None
     expressive_send_style_id: str | None
     enriched: bool = False
+    attributed_body_raw: bytes | None = None
+    # Per-instance caches for ``body`` / ``parts``.  ``functools.cached_property``
+    # cannot be used on a frozen, slotted dataclass, so these are private slots
+    # written with ``object.__setattr__``; ``init=False`` keeps them out of the
+    # constructor and ``dataclasses.replace`` (which resets them), and
+    # ``compare=False`` / ``repr=False`` keep them out of ``==`` and ``repr``.
+    _body_cache: AttributedBody | None | _Unset = field(
+        default=_UNSET, init=False, repr=False, compare=False
+    )
+    _parts_cache: tuple[Part, ...] | _Unset = field(
+        default=_UNSET, init=False, repr=False, compare=False
+    )
 
     # ----- derived views -----
+
+    @property
+    def body(self) -> AttributedBody | None:
+        """``attributed_body_raw`` parsed by the typedstream reader; ``None`` if it cannot be.
+
+        Computed on first access and cached; never raises.
+        """
+        cached = self._body_cache
+        if isinstance(cached, _Unset):
+            cached = try_parse_attributed_body(self.attributed_body_raw)
+            object.__setattr__(self, "_body_cache", cached)
+        return cached
+
+    @property
+    def parts(self) -> tuple[Part, ...]:
+        """``message_parts(body)``, or ``()`` when ``body`` is ``None``.  Cached."""
+        cached = self._parts_cache
+        if isinstance(cached, _Unset):
+            body = self.body
+            cached = () if body is None else message_parts(body)
+            object.__setattr__(self, "_parts_cache", cached)
+        return cached
 
     @property
     def is_group(self) -> bool:
@@ -401,6 +458,23 @@ class ChatMatch:
     display_name: str | None
     is_group: bool
     last_rowid: int
+
+
+@dataclass(frozen=True, slots=True)
+class ChatActivity:
+    """One chat that gained messages (``chats_changed_since``).
+
+    ``chat_rowid`` is the ``chat.ROWID``; ``last_rowid`` is the newest
+    ``message.ROWID`` joined to it -- the same value ``ChatSummary.last_rowid``
+    carries, so a cached chat list can be refreshed in place.
+    """
+
+    chat_rowid: int
+    last_rowid: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Keys: ``chat_rowid, last_rowid``."""
+        return {"chat_rowid": self.chat_rowid, "last_rowid": self.last_rowid}
 
 
 @dataclass(frozen=True, slots=True)

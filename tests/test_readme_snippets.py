@@ -4,8 +4,9 @@ Every ```python block in README.md is compiled.  Blocks whose first line is
 ``# doctest-fixture`` are also executed, each in a fresh namespace with
 ``DB_PATH`` bound to a synthetic database built under ``tmp_path`` (covering
 chats, blob-only text, tapbacks, a reply, a URL balloon with an embedded image,
-a real file attachment, a plugin payload and an edit).  Snippets print; pytest
-captures.  The real database is never touched.
+a real file attachment, a plugin payload, an edit, an unsend and a multi-run
+``attributedBody`` the 0.2 reader parses).  Snippets print; pytest captures.
+The real database is never touched.
 """
 
 from __future__ import annotations
@@ -19,7 +20,13 @@ from imessage_chatdb.link_preview import LINK_BALLOON
 from tests.conftest import FixtureDB, MakeDB
 from tests.fixtures import builders as b
 from tests.fixtures.keyed_archive_writer import make_link_payload
-from tests.fixtures.typedstream_writer import encode_attributed_body
+from tests.fixtures.typedstream_writer import (
+    FILE_TRANSFER_GUID,
+    MENTION,
+    PART,
+    encode_attributed_body,
+    encode_attributed_body_runs,
+)
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 FIXTURE_MARK = "# doctest-fixture"
@@ -49,6 +56,13 @@ def build_readme_db(fx: FixtureDB, tmp_path: Path) -> None:
     m1 = b.add_message(w, one, text="hello from the fixture", handle=PHONE)
     b.add_message(w, one, text="hello back", is_from_me=1)
     b.add_message(w, one, body=encode_attributed_body("blob-only hello ￼"), handle=PHONE)
+    # A byte-exact multi-run blob (attachment placeholder, text, a mention) for the reader.
+    runs: list[tuple[int, dict[str, object]]] = [
+        (1, {FILE_TRANSFER_GUID: "ATT-3", PART: 0}),
+        (5, {PART: 1}),
+        (4, {PART: 1, MENTION: OTHER}),
+    ]
+    b.add_message(w, one, body=encode_attributed_body_runs("￼ see @Sam", runs), handle=PHONE)
     b.add_message(w, one, assoc_guid=f"p:0/SYN-MSG-{m1:06d}", assoc_type=2000, handle=PHONE)
     b.add_message(
         w, one, assoc_guid=f"p:0/SYN-MSG-{m1:06d}", assoc_type=2006, assoc_emoji="\U0001f525",
@@ -78,6 +92,8 @@ def build_readme_db(fx: FixtureDB, tmp_path: Path) -> None:
 
     m_edit = b.add_message(w, grp, text="group text, edited", handle=PHONE)
     b.set_date_edited(w, m_edit, b.BASE_DATE_NS + 10_000 * b.DATE_STEP_NS)
+    m_unsent = b.add_message(w, grp, text="group text, then unsent", is_from_me=1)
+    b.set_date_retracted(w, m_unsent, b.BASE_DATE_NS + 10_001 * b.DATE_STEP_NS, clear_text=True)
     b.add_message(w, grp, text="latest group message", is_from_me=1, service="SMS")
 
 

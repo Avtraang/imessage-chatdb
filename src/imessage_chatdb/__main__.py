@@ -3,14 +3,18 @@
 Subcommands::
 
     check                       open the database, print profile + max ROWID + "Full Disk Access OK"
-    tail [--since-rowid N] [--follow] [--limit N] [--interval S]
+    tail [--since-rowid N] [--follow] [--limit N] [--interval S] [--parts]
     chats [--limit N]
-    search TEXT [--limit N] [--chat GUID]
+    search TEXT [--limit N] [--chat GUID] [--parts]
 
 Every subcommand takes ``--db PATH`` (default ``~/Library/Messages/chat.db``).
 ``tail``, ``chats`` and ``search`` print one JSON object per line from
 ``Message.to_dict()`` / ``ChatSummary.to_dict()`` / ``SearchHit.to_dict()``;
-``check`` prints one JSON object describing the database.
+``check`` prints one JSON object describing the database.  ``--parts`` (0.2)
+appends a ``"parts"`` key to each ``tail`` / ``search`` line: the message's
+``Message.parts`` as ``Part.to_dict()`` dicts (``[]`` when the blob cannot be
+parsed); without the flag the output is byte-identical to 0.1.1.  For
+``search`` the parts come from one extra ``message()`` fetch per hit.
 
 Privacy: ``tail``, ``chats`` and ``search`` print message content (text,
 handles, chat names) to stdout as JSON lines, so do not point them at a log
@@ -48,7 +52,8 @@ from typing import IO, Any, NoReturn
 from .chats import chats_by_activity
 from .connection import DEFAULT_CHATDB, open_connection
 from .errors import ChatDBAccessError, ChatDBBusy, ChatDBError
-from .messages import max_rowid, messages_after
+from .messages import max_rowid, message, messages_after
+from .models import Message
 from .schema import Schema
 from .search import search as search_hits
 
@@ -161,6 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help=f"seconds between polls with --follow (default: {DEFAULT_FOLLOW_INTERVAL})",
     )
+    tail.add_argument(
+        "--parts",
+        action="store_true",
+        help='add a "parts" key: the attributedBody split into text and attachment parts',
+    )
 
     chats = sub.add_parser(
         "chats",
@@ -193,6 +203,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="GUID",
         help="only search messages of the chat with this guid (default: every chat)",
     )
+    srch.add_argument(
+        "--parts",
+        action="store_true",
+        help='add a "parts" key to each hit (one extra message fetch per hit)',
+    )
     return parser
 
 
@@ -200,6 +215,11 @@ def _emit(out: IO[str], obj: dict[str, Any]) -> None:
     out.write(json.dumps(obj, ensure_ascii=False))
     out.write("\n")
     out.flush()
+
+
+def _parts_json(m: Message | None) -> list[dict[str, Any]]:
+    """``Message.parts`` as JSON-ready dicts; ``[]`` for a missing message or unparsable blob."""
+    return [] if m is None else [p.to_dict() for p in m.parts]
 
 
 def _discard_further_output(out: IO[str]) -> None:
@@ -247,7 +267,13 @@ def _cmd_check(args: argparse.Namespace, out: IO[str]) -> int:
 
 
 def _tail_round(
-    db_path: str, since: int | None, limit: int | None, out: IO[str], err: IO[str]
+    db_path: str,
+    since: int | None,
+    limit: int | None,
+    out: IO[str],
+    err: IO[str],
+    *,
+    parts: bool = False,
 ) -> int:
     """One ``messages_after`` round on a fresh connection; returns the new cursor."""
     conn = open_connection(db_path)
@@ -260,7 +286,10 @@ def _tail_round(
             err.write(f"warning: rowid {cursor} is ahead of MAX(ROWID) {top}; restarting at now\n")
             cursor = top
         for m in messages_after(conn, schema, cursor, limit=limit):
-            _emit(out, m.to_dict())
+            d = m.to_dict()
+            if parts:
+                d["parts"] = _parts_json(m)
+            _emit(out, d)
             cursor = m.rowid
         return cursor
     finally:
@@ -272,13 +301,13 @@ def _cmd_tail(
 ) -> int:
     since: int | None = args.since_rowid
     if not args.follow:
-        _tail_round(args.db, since, args.limit, out, err)
+        _tail_round(args.db, since, args.limit, out, err, parts=args.parts)
         return EXIT_OK
     cursor = since
     try:
         while True:
             try:
-                cursor = _tail_round(args.db, cursor, args.limit, out, err)
+                cursor = _tail_round(args.db, cursor, args.limit, out, err, parts=args.parts)
             except ChatDBBusy:
                 pass  # retry next round, nothing advanced
             sleep(args.interval)
@@ -299,8 +328,12 @@ def _cmd_chats(args: argparse.Namespace, out: IO[str]) -> int:
 def _cmd_search(args: argparse.Namespace, out: IO[str]) -> int:
     conn = open_connection(args.db)
     try:
+        schema = Schema(conn) if args.parts else None
         for hit in search_hits(conn, args.text, limit=args.limit, chat_guid=args.chat):
-            _emit(out, hit.to_dict())
+            d = hit.to_dict()
+            if schema is not None:
+                d["parts"] = _parts_json(message(conn, schema, hit.rowid, enrich=False))
+            _emit(out, d)
     finally:
         conn.close()
     return EXIT_OK

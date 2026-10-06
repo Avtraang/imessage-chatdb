@@ -25,6 +25,7 @@ from imessage_chatdb.connection import open_connection
 from imessage_chatdb.db import ChatDB, open
 from imessage_chatdb.errors import ChatDBAccessError, ChatDBBusy
 from imessage_chatdb.link_preview import LINK_BALLOON, embedded_image
+from imessage_chatdb.models import ChatActivity
 from imessage_chatdb.polling import Cursor
 from imessage_chatdb.schema import Schema
 from tests.conftest import FixtureDB, MakeDB, Pristine, sha256_of
@@ -196,6 +197,7 @@ def _facade_calls(db: ChatDB, d: dict[str, Any]) -> list[tuple[str, Callable[[],
         ("participants_map", db.participants_map),
         ("chat_services", lambda: db.chat_services([one, group])),
         ("last_rowid_for", lambda: db.last_rowid_for(one)),
+        ("chats_changed_since", lambda: db.chats_changed_since(0)),
         ("unread_count", lambda: db.unread_count(one, 0)),
         ("lite_messages", lambda: db.lite_messages(msgs)),
         ("one_to_one_activity", db.one_to_one_activity),
@@ -500,6 +502,11 @@ def test_chat_methods_match_module_functions(
     assert db.chat_services([one, group]) == {one: "iMessage", group: "iMessage"}
 
     assert db.last_rowid_for(one) == chats_mod.last_rowid_for(conn, one) == msgs[2]
+    assert db.chats_changed_since(0) == chats_mod.chats_changed_since(conn, 0)
+    assert {a.chat_rowid: a.last_rowid for a in db.chats_changed_since(0)} == {
+        c.rowid: c.last_rowid for c in db.chats()
+    }
+    assert db.chats_changed_since(msgs[-1]) == []
     assert db.unread_count(one, 0) == chats_mod.unread_count(conn, one, 0)
     assert db.unread_count(one, 0) == 2  # incoming only by default
     assert db.unread_count(one, 0, incoming_only=False) == 3
@@ -619,7 +626,7 @@ def test_package_reexports_resolve_to_submodule_objects() -> None:
     assert imessage_chatdb.ChatDBBusy is errors.ChatDBBusy
     assert imessage_chatdb.CursorAhead is errors.CursorAhead
     assert imessage_chatdb.Schema is Schema
-    assert imessage_chatdb.__version__ == "0.1.1"
+    assert imessage_chatdb.__version__ == "0.2.0"
 
 
 def test_all_names_are_real_attributes_not_lazy() -> None:
@@ -644,7 +651,7 @@ def test_design_4_3_names_are_exported() -> None:
         "address_key", "is_email", "is_group_style",
         "extract_urls", "snippet",
         "Message", "Attachment", "ReplyTarget", "LiteMessage", "Chat", "ChatSummary",
-        "ChatMatch", "SearchHit",
+        "ChatMatch", "ChatActivity", "SearchHit",
         "ChatDBError", "ChatDBAccessError", "ChatDBBusy", "CursorAhead", "SchemaError",
         "Cursor", "Event", "poll_once", "watch", "run_watch",
         "ChatDB", "open_connection", "DEFAULT_CHATDB",
@@ -782,6 +789,12 @@ def test_every_facade_method_leaves_the_pristine_file_untouched(
     assert set(db.participants_map()) == {pristine_db.chat_rowid, pristine_db.group_rowid}
     assert db.chat_services([pristine_db.chat_rowid])[pristine_db.chat_rowid] == "iMessage"
     assert db.last_rowid_for(pristine_db.chat_rowid) == pristine_db.rowids[2]
+    assert [a.chat_rowid for a in db.chats_changed_since(0)] == [
+        pristine_db.group_rowid, pristine_db.chat_rowid
+    ]
+    assert db.chats_changed_since(pristine_db.rowids[2]) == [
+        ChatActivity(pristine_db.group_rowid, pristine_db.rowids[-1])
+    ]
     assert db.unread_count(pristine_db.chat_rowid, 0) == 3
     assert set(db.lite_messages(pristine_db.rowids)) == set(pristine_db.rowids)
     assert db.one_to_one_activity() == [(PHONE, pristine_db.rowids[2])]

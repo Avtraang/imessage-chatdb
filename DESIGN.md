@@ -14,7 +14,7 @@ Rank sums tie (P1 = 1+3, P2 = 3+1, P3 = 2+2). P3 is second for both judges; P1 a
 - **Correctness layer = P3.** `effective_text` as the only exact statement of the relay's text rule; `extract_text` with the `n >= 0x80 -> None` guard and 4/8-byte `0x82`/`0x83` reads; connection invariants (`mode=ro` URI + `PRAGMA query_only`, autocommit, every query `fetchall()`-ed, never `immutable=1`); `ChatDBBusy` -> `([], cursor)` and `ChatDBAccessError` naming `sys.executable`; `CursorAhead`; `include_orphans`; raw Apple-int dates on the dataclasses; four schema profiles; WAL-vs-immutable and `BEGIN EXCLUSIVE` tests; fuzz; counts-only shadow diff plus an HTTP-side diff; `Message.to_dict()` with relay keys and raw values.
 - **Ergonomic surface = P1.** `imessage_chatdb.open()`, `ChatDB.watch()` generator with a frozen `Cursor`, `poll()` as the primitive, `FullDiskAccessRequired`-style error text, the `python -m imessage_chatdb` CLI, the `CASE WHEN balloon_bundle_id ... THEN payload_data END` trim (output-neutral: `row_to_msg` only parses the payload for the URL balloon), and a **committed** `tests/test_relay_compat.py` in the relay repo.
 - **Rule carried from P2, applied everywhere:** *facts live in the library, strings live in the relay.* `TAPBACK_VERBS`, "Photo"/"Video"/"Attachment" previews, "You", "me", first-name formatting, `group_title`, `att_public` URLs, HEIC advertising, `/link_image/{rowid}` paths are relay code. P1's `one_line_summary`, `Tapback.verb`, `format_group_title` are dropped.
-- **Scope cut from P3:** the full `TypedStreamReader` + `MessagePart` parts API, `edit_history()`, and retraction events are **not** in v0.1 (judge 1 objection 12). v0.1 ships the byte-scan `extract_text` only; the reader lands in v0.2 as a separate module with the fast path as its oracle.
+- **Scope cut from P3:** the full `TypedStreamReader` + `MessagePart` parts API, `edit_history()`, and retraction events are **not** in v0.1 (judge 1 objection 12). v0.1 ships the byte-scan `extract_text` only; the reader lands in v0.2 as a separate module with the fast path as its oracle. *(Shipped in 0.2.0 — §14.)*
 
 Every objection from both judges is resolved in §13 with a one-line disposition. Facts stated here were verified read-only against the live macOS 27 database by the proposals and the judges (column names and counts only; no content was read into any document).
 
@@ -32,7 +32,7 @@ Every objection from both judges is resolved in §13 with a one-line disposition
 - Attachment URLs, HEIC/JPEG transcoding, thumbnails (relay).
 - Relay state: reads, pins, archive, auto-translate, icons, forced-unread (relay).
 - Writing to chat.db, sending messages, AppleScript/Shortcuts (never).
-- Full typedstream parts API, edit history from `message_summary_info`, retraction events, FTS (v0.2+).
+- Edit history from `message_summary_info`, FTS (later). *(The full typedstream parts API and retraction events were v0.2+ here and shipped in 0.2.0 — §14.)*
 - Any dependency beyond the standard library at runtime.
 
 ---
@@ -56,12 +56,15 @@ Every objection from both judges is resolved in §13 with a one-line disposition
 imessage-chatdb/
   pyproject.toml              hatchling; name imessage-chatdb; requires-python >=3.12; dependencies = []
   README.md  LICENSE (MIT)  CHANGELOG.md
+  docs/TYPEDSTREAM.md         0.2: the attributedBody grammar, verified facts, fixture writer and reader API (§14)
   src/imessage_chatdb/
     __init__.py               open(), ChatDB, models, pure functions, errors, __version__
     py.typed
     errors.py                 ChatDBError, ChatDBAccessError, ChatDBBusy, CursorAhead, SchemaError
     dates.py                  APPLE_EPOCH_OFFSET, apple_to_unix, unix_to_apple, apple_to_datetime
     typedstream.py            extract_text, effective_text, clean_text     (byte-scan fast path only in v0.1)
+    typedstream_reader.py     0.2 (§14): TypedStreamError, AttributedBody, AttributeRun, Url, UnknownValue, parse_attributed_body,
+                              try_parse_attributed_body, Mention, TextPart, AttachmentPart, UnknownPart, Part, message_parts
     keyed_archive.py          KeyedArchive: plistlib + UID deref (visited set), string()/nsurl() helpers
     link_preview.py           LINK_BALLOON, SKIP_IMG, LinkPreview, parse_link_preview, embedded_image, sniff_image_mime
     reactions.py              Reaction, classify_reaction, parse_associated_guid
@@ -75,18 +78,20 @@ imessage-chatdb/
                               thread_messages, recent_messages, message, messages_by_guid, reply_targets, enrich
     attachments.py            is_plugin_payload, attachments_for, attachment_by_guid, chat_attachments, payload_for
     chats.py                  chats_by_activity, chat, chat_by_rowid, participants, participants_map, chat_services,
-                              last_rowid_for, unread_count, lite_messages, one_to_one_activity, find_chat
+                              last_rowid_for, chats_changed_since, unread_count, lite_messages, one_to_one_activity, find_chat
     search.py                 search, extract_urls, snippet
     polling.py                Cursor, Event, poll_once, watch, run_watch (all re-exported; `imessage_chatdb.watch` is the generator)
     db.py                     ChatDB facade (one connection per call; connection() for batching)
-    __main__.py               python -m imessage_chatdb check|tail|chats|search
+    __main__.py               python -m imessage_chatdb check|tail|chats|search   (0.2: tail/search --parts)
   tests/
     conftest.py               refuses any path under ~/Library; builds tmp_path WAL databases per profile
     fixtures/schema_profiles.py   macos14 / macos15 / macos26 / macos27 DDL subsets with real key constraints
     fixtures/builders.py          add_handle / add_chat / add_message / add_attachment
     fixtures/typedstream_writer.py   encode_attributed_body(text, *, mutable=False, force_len_tag=None)
     fixtures/keyed_archive_writer.py make_link_payload(...)
+                              (0.2: typedstream_writer.py also holds encode_attributed_body_runs, the byte-exact archiver)
     test_dates.py test_typedstream.py test_link_preview.py test_reactions.py test_services.py
+    test_typedstream_reader.py test_retractions.py                        (0.2, §14)
     test_schema.py test_connection.py test_messages.py test_edits.py test_attachments.py
     test_chats.py test_find_chat.py test_search.py test_watch.py test_cli.py test_fuzz.py
 ```
@@ -269,6 +274,8 @@ def chat_services(conn, chat_rowids: Iterable[int]) -> dict[int, str | None]
                    # relay's two-correlated-subquery statement verbatim; value = service_family(out) or service_family(any) or service_family(chat)
                    # RAISES on SQL failure (the relay wrapper keeps its try/except -> {})
 def last_rowid_for(conn, chat_rowid: int) -> int
+def chats_changed_since(conn, rowid: int) -> list[ChatActivity]              # 0.2 library addition: chat_message_join only,
+                   # SELECT chat_id, MAX(message_id) WHERE message_id > ? GROUP BY chat_id ORDER BY last DESC (one index range scan)
 def unread_count(conn, chat_rowid: int, after_rowid: int, *, incoming_only: bool = True) -> int   # relay's UNREAD SQL verbatim
 def lite_messages(conn, rowids: Iterable[int]) -> dict[int, LiteMessage]
                    # relay's last_message_previews SELECT verbatim + attachments_for(has_attachments rows) — facts only
@@ -313,14 +320,15 @@ class ChatDB:
     def participants_map(self) -> dict[int, list[str]]
     def chat_services(self, chat_rowids) -> dict[int, str | None]
     def last_rowid_for(self, chat_rowid) -> int
+    def chats_changed_since(self, rowid) -> list[ChatActivity]   # 0.2
     def unread_count(self, chat_rowid, after_rowid, *, incoming_only=True) -> int
     def lite_messages(self, rowids) -> dict[int, LiteMessage]
     def one_to_one_activity(self) -> list[tuple[str, int]]
     def find_chat(self, addresses, *, key=address_key, exclude=()) -> ChatMatch | None
     def search(self, q, *, limit=30) -> list[SearchHit]
-    def poll(self, cursor: Cursor, *, include_edits=True) -> tuple[list[Event], Cursor]
+    def poll(self, cursor: Cursor, *, include_edits=True, include_retractions=False) -> tuple[list[Event], Cursor]   # 0.2 keyword
     def watch(self, cursor: Cursor | None = None, *, interval=2.0, stop: threading.Event | None = None,
-              include_edits=True, sleep=time.sleep) -> Iterator[Event]
+              include_edits=True, include_retractions=False, sleep=time.sleep) -> Iterator[Event]        # 0.2 keyword
 ```
 
 ### 4.6 Watching
@@ -330,34 +338,37 @@ class ChatDB:
 class Cursor:
     rowid: int = 0           # last ROWID delivered
     edit_mark: int = 0       # raw Apple ns date_edited high-water mark (int, never converted)
+    retract_mark: int = 0    # 0.2: raw date_retracted high-water mark; to_json writes it, from_json reads a missing key as 0
     def to_json(self) -> dict; @classmethod def from_json(cls, d) -> "Cursor"
 
 @dataclass(frozen=True, slots=True)
-class Event: kind: Literal["new", "edited"]; message: Message; cursor: Cursor
+class Event: kind: Literal["new", "edited", "retracted"]; message: Message; cursor: Cursor   # "retracted" is 0.2, opt-in
     # cursor = what to persist once THIS event is handled: "new" -> Cursor(own rowid, round's starting mark);
     # "edited" -> Cursor(round's final rowid, max(previous, raw date_edited)) -- but a row tied on date_edited with a
     #   later row in the round keeps the previous mark (only the tie's last event passes the value; the resume query is
     #   strict, so a checkpoint inside a tie replays the tie rather than skipping it); last event's cursor == poll_once's
 
-def poll_once(db: ChatDB, cursor: Cursor, *, include_edits: bool = True) -> tuple[list[Event], Cursor]:
+def poll_once(db: ChatDB, cursor: Cursor, *, include_edits: bool = True, include_retractions: bool = False) -> tuple[list[Event], Cursor]:
     """One round. Rules:
        - top = max_rowid(); if top < cursor.rowid: raise CursorAhead(cursor.rowid, top)   (rebuilt DB; caller decides)
        - new = messages_after(cursor.rowid); rowid advances only to new[-1].rowid (at-least-once)
        - edits only when include_edits and schema has date_edited; mark = max raw value returned, never regresses
        - ChatDBBusy anywhere -> ([], cursor) (no events, nothing advanced)
-       - 'new' events precede 'edited' events in a round"""
-def watch(db, cursor=None, *, interval=2.0, stop=None, include_edits=True, sleep=time.sleep) -> Iterator[Event]
+       - 'new' events precede 'edited' events in a round
+       - 0.2: unsends only when include_retractions (default False, so the 0.1 stream is unchanged) and schema has
+         date_retracted; 'retracted' events follow the 'edited' ones with the same tie and cursor rules (§14)"""
+def watch(db, cursor=None, *, interval=2.0, stop=None, include_edits=True, include_retractions=False, sleep=time.sleep) -> Iterator[Event]
     # cursor=None -> db.initial_cursor() (start at now, no replay); yields events; sleeps `interval` between rounds;
     # exits when stop.is_set(); CursorAhead propagates (documented)
 def run_watch(db, on_event: Callable[[Event], None], *, on_cursor: Callable[[Cursor], None] | None = None, **kw) -> None
     # on_cursor fires after each advanced round, for persistence
 ```
 
-Retractions (`date_retracted`) are deliberately **not** an event kind in v0.1; `Message.date_retracted` is exposed for callers to inspect (judge 1 objection 6, judge 2 objection 11: no folding of two columns into one mark).
+Retractions (`date_retracted`) are deliberately **not** an event kind in v0.1; `Message.date_retracted` is exposed for callers to inspect (judge 1 objection 6, judge 2 objection 11: no folding of two columns into one mark). *0.2.0 adds them as the opt-in third kind with their own mark — still no folding — see §14.*
 
 ### 4.7 CLI
 
-`python -m imessage_chatdb check` (opens the DB, prints profile + max ROWID + "Full Disk Access OK", or the access error), `tail [--since-rowid N] [--follow]`, `chats [--limit N]`, `search TEXT [--limit N]`. Output is one JSON object per line from `Message.to_dict()` / `ChatSummary.to_dict()` / `SearchHit.to_dict()`. argparse only.
+`python -m imessage_chatdb check` (opens the DB, prints profile + max ROWID + "Full Disk Access OK", or the access error), `tail [--since-rowid N] [--follow]`, `chats [--limit N]`, `search TEXT [--limit N]`. Output is one JSON object per line from `Message.to_dict()` / `ChatSummary.to_dict()` / `SearchHit.to_dict()`. argparse only. *0.2: `search TEXT --chat GUID` (0.1.1) and `tail --parts` / `search --parts`, which append a `"parts"` key; without the flag every line is byte-identical to 0.1.1 (§14).*
 
 ---
 
@@ -382,8 +393,10 @@ class Message:
     item_type: int | None; group_action_type: int | None; group_title: str | None
     filter_action: int | None; is_spam: bool | None; expressive_send_style_id: str | None
     enriched: bool
+    attributed_body_raw: bytes | None = None   # 0.2, keyword-only: the raw blob; row_to_message fills it; not in to_dict()
     # properties
     is_group -> chat_style == 43; service -> Service; reaction -> Reaction | None; is_tapback -> bool
+    body -> AttributedBody | None; parts -> tuple[Part, ...]   # 0.2: try_parse_attributed_body / message_parts, cached, never raise
     date_unix / date_read_unix / date_edited_unix / date_retracted_unix -> float | None
     datetime -> datetime | None; clean_text -> str
     def to_dict(self) -> dict   # relay keys in relay order, raw values (§5.1)
@@ -401,6 +414,7 @@ class Chat: rowid: int; guid: str; style: int | None; chat_identifier: str | Non
             is_group -> bool
 class ChatSummary(Chat): last_date: int | None; last_rowid: int
 class ChatMatch: chat_rowid: int; chat_guid: str; chat_identifier: str | None; display_name: str | None; is_group: bool; last_rowid: int
+class ChatActivity: chat_rowid: int; last_rowid: int                       # 0.2: chats_changed_since
 class SearchHit: rowid: int; chat_rowid: int; chat_guid: str; chat_identifier: str | None; chat_display_name: str | None
                  is_group: bool; date: int; is_from_me: bool; sender_handle: str | None; text: str; match_index: int
 ```
@@ -444,7 +458,7 @@ Statements kept verbatim in `sql.py` because their row order or row set is JSON-
 
 ### 6.2 `extract_text` and the 0x82 question
 
-The byte-scan locator is the relay's; there are two changes, both recorded in the CHANGELOG as knowing deviations. (1) Length tag handling: `0x82` reads **4** bytes (relay: 3), `0x83` reads 8, any other tag `>= 0x80` returns `None` instead of being used as a raw length. Zero `0x82` rows exist (the largest text is under 10 KB), so the relay's output cannot change today. (2) Truncation: a blob cut before the end of its text — in the header, in the length tag or its length bytes, or inside the text itself — decodes to `None`, never a partial string; a blob cut only in the `0x86` trailer after the text (the text is complete) decodes to the complete text, exactly as an intact blob would. That is the §8.2 pin; the relay returned the partial decode. Every live blob carries the `0x86` trailer after its text, so this is reachable only on a corrupt blob. The full typedstream reader (shared-string table `0x92+i`, `0x84` new / `0x85` nil / `0x86` end, UTF-16 run lengths for the attribute table) is v0.2 scope; when it lands, `extract_text` is its oracle on every well-formed blob.
+The byte-scan locator is the relay's; there are two changes, both recorded in the CHANGELOG as knowing deviations. (1) Length tag handling: `0x82` reads **4** bytes (relay: 3), `0x83` reads 8, any other tag `>= 0x80` returns `None` instead of being used as a raw length. Zero `0x82` rows exist (the largest text is under 10 KB), so the relay's output cannot change today. (2) Truncation: a blob cut before the end of its text — in the header, in the length tag or its length bytes, or inside the text itself — decodes to `None`, never a partial string; a blob cut only in the `0x86` trailer after the text (the text is complete) decodes to the complete text, exactly as an intact blob would. That is the §8.2 pin; the relay returned the partial decode. Every live blob carries the `0x86` trailer after its text, so this is reachable only on a corrupt blob. The full typedstream reader (shared-string table `0x92+i`, `0x84` new / `0x85` nil / `0x86` end, UTF-16 run lengths for the attribute table) was v0.2 scope and shipped in 0.2.0 as `typedstream_reader.py`, specified in `docs/TYPEDSTREAM.md`; `extract_text` is its oracle on every well-formed blob (tested; §14).
 
 ### 6.3 `parse_link_preview` (logic ported unchanged from the relay)
 
@@ -756,7 +770,7 @@ Each task names the files it owns; no two tasks own the same file. "Done" always
 7. Orphan rows (a few hundred) are hidden by the inner join; `include_orphans` is the escape hatch; Messages.app appears to write both rows in one transaction.
 8. Performance: `chats()` GROUP BY and `search`'s four `instr()` scans are O(messages); fine at 20k, documented for 500k+.
 9. Privacy: tests never touch real data; shadow diff prints counts/rowids only; the library never logs content; the repo contains no backups, state, or tokens.
-10. Scope discipline: v0.2 items (typedstream reader, parts, edit history, retraction events, `date_updated`) are listed so they do not creep into v0.1.
+10. Scope discipline: v0.2 items (typedstream reader, parts, edit history, retraction events, `date_updated`) are listed so they do not creep into v0.1. *(0.2.0 shipped the reader, parts and retraction events — §14; edit history and `date_updated` remain open.)*
 
 ---
 
@@ -787,3 +801,77 @@ Each task names the files it owns; no two tasks own the same file. "Done" always
 | 21 | Thread-local autocommit connections (P1) vs per-call (P2/P3) | **Per-call** (see 14); `connection()` context manager for batching; `isolation_level=None` and `fetchall()` everywhere so no snapshot lingers. |
 | 22 | P3's `date_updated` reliance | **Rejected for v0.1.** Semantics unverified; listed as a v0.2 experiment. |
 | 23 | P1's `find_chat` `key=canonical_address` default | **Kept as `address_key`** (digits, last 10 when >= 10; email lowercased) — matches the relay's `norm_key` for non-contact inputs; the relay passes `person_key`. |
+
+---
+
+## 14. Addendum — what 0.2.0 shipped (2026-10-06)
+
+Everything above describes v0.1 as designed; this section records the v0.2
+scope as it landed. The rule for the release was **additive**: every 0.1.x
+call keeps its signature, defaults and output (`extract_text` /
+`effective_text` untouched, every relay-pinned statement byte-identical,
+`to_dict()` unchanged, the CLI byte-identical without a new flag, and the
+default event stream the 0.1 stream). `CHANGELOG.md` 0.2.0 is the user-facing
+statement; the design points are:
+
+### 14.1 Typedstream reader (`typedstream_reader.py`, spec `docs/TYPEDSTREAM.md`)
+
+- A separate module, as §0 planned; `typedstream.py` is not touched and
+  `extract_text` is the oracle (`parse_attributed_body(b).text ==
+  (extract_text(b) or "")` on every writer-produced blob). Two layers: the
+  generic typedstream grammar (`_Reader`: header, integers, the two shared
+  tables, typed-value groups, literal objects and references) and the
+  `NSAttributedString` interpretation (`parse_attributed_body`: text, `iI`
+  run pairs with the dictionary-index rule, attribute value conversion,
+  `message_parts`). Public surface: `TypedStreamError`, `AttributedBody`,
+  `AttributeRun` (UTF-16 offsets; `chars()` converts), `Url`, `UnknownValue`,
+  `Mention`, `TextPart`, `AttachmentPart`, `UnknownPart`, `Part`,
+  `parse_attributed_body`, `try_parse_attributed_body`, `message_parts`, all
+  in `__all__`.
+- **Hardening rules (fixed after the first 0.2 review):** every depth is a
+  counter, never the interpreter's recursion limit — literal object nesting
+  (64), class-chain length (64, read iteratively, references included) and
+  the nesting of *converted* values (64 mappings, counted through
+  back-references, since a reference DAG can nest deeper than any literal).
+  Each archived object is converted once and cached on it, so conversion is
+  linear in time and memory however many runs or pairs reference one object.
+  `message_parts` converts all run offsets in one pass (linear in text +
+  runs). In value position a known class with an unexpected layout becomes
+  `UnknownValue` like an unknown class; the text string, a key and a run
+  dictionary stay strict. `try_parse_attributed_body` additionally catches
+  `RecursionError` as a backstop. `test_fuzz.py` feeds the reader the same
+  never-raise corpus as the other decoders.
+- The 0.1 fixture writer `encode_attributed_body` is kept byte-for-byte for
+  the 0.1 pins; the reader rejects its blobs (three trailer discrepancies,
+  `docs/TYPEDSTREAM.md` §7). `encode_attributed_body_runs` is the byte-exact
+  archiver the reader is tested against.
+- `Message.attributed_body_raw` (keyword-only, default `None`, filled by
+  `row_to_message`), `Message.body` and `Message.parts` (cached in private
+  non-compared slots; never raise). `to_dict()`, `==`, `hash()`, `repr()`
+  unchanged. CLI: `tail --parts` / `search --parts` append a `"parts"` key.
+
+### 14.2 Retraction events (`polling.py`, `messages.py`, `sql.py`)
+
+- `Cursor.retract_mark` (third field, default 0; `to_json()` writes it,
+  `from_json()` reads a missing key as 0). `Event.kind` gains `"retracted"`;
+  within a round `"new"`, then `"edited"`, then `"retracted"` events, with the
+  same per-event cursor and tie rules as edits (§4.6) — the retracted events
+  carry the round's final edit mark and a running retract mark, so a resume
+  from an edited event's cursor replays all the round's unsends.
+- The columns are **not** folded into one mark (objection 6 stands):
+  `messages_retracted_after` / `max_date_retracted` are the edit statements
+  with `date_retracted` substituted, pinned as derived statements.
+- **Opt-in** (`include_retractions=False` by default on `poll_once`, `watch`,
+  `run_watch`, `ChatDB.poll`, `ChatDB.watch`): a 0.1 consumer written as
+  `if kind == "new": ... else: apply_edit(...)` must not receive a third kind
+  it does not know. While off, the mark does not move, so opting in later
+  delivers the missed unsends; `initial_cursor()` seeds the mark regardless.
+- `chats_changed_since` / `ChatActivity` (§4.3/§5 above) are the other 0.2
+  additions; `search(..., chat_guid=)` was 0.1.1.
+
+### 14.3 Still open
+
+Edit history from `message_summary_info`, `date_updated` as a universal
+change mark (unverified), FTS, retiring `encode_attributed_body`
+(test-only). A CLI switch for retraction events in `tail --follow` was not
+added (the CLI stays byte-identical to 0.1.1 without a new flag).

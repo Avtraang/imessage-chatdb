@@ -7,7 +7,8 @@ Changing a statement is therefore a deliberate, versioned change, never a
 side effect of a refactor.  The one exception is ``SEARCH_IN_CHAT``, a
 library addition derived from ``SEARCH`` at import time by inserting a single
 ``AND c.guid = ?`` line (``SEARCH`` itself is untouched); the tests pin that
-derivation instead of a golden copy.
+derivation instead of a golden copy.  ``CHATS_CHANGED_SINCE`` is a library
+addition with no relay ancestor; the tests pin its shape instead.
 
 Statements the relay builds with an f-string keep the literal ``{ph}``
 placeholder; expand it with :func:`expand_in` before executing::
@@ -26,16 +27,19 @@ __all__ = [
     "expand_in",
     "AFTER_ROWID_SUFFIX",
     "EDITED_AFTER_SUFFIX",
+    "RETRACTED_AFTER_SUFFIX",
     "THREAD_WHERE_SUFFIX",
     "THREAD_BEFORE_SUFFIX",
     "THREAD_ORDER_SUFFIX",
     "MAX_ROWID",
     "MAX_DATE_EDITED",
+    "MAX_DATE_RETRACTED",
     "REPLY_TARGETS",
     "ATTACHMENTS_FOR",
     "LITE_MESSAGES",
     "PARTICIPANTS",
     "LAST_ROWID",
+    "CHATS_CHANGED_SINCE",
     "FIND_1TO1",
     "FIND_GROUP_JOINS",
     "FIND_GROUP_SENDERS",
@@ -70,6 +74,10 @@ def expand_in(statement: str, count: int) -> str:
 
 AFTER_ROWID_SUFFIX = " WHERE m.ROWID > ? ORDER BY m.ROWID ASC"
 EDITED_AFTER_SUFFIX = " WHERE m.date_edited > ? ORDER BY m.date_edited ASC"
+#: Library addition (0.2, not a relay statement): ``EDITED_AFTER_SUFFIX`` with
+#: ``date_retracted`` in place of ``date_edited`` -- the unsend tail, same shape,
+#: same strict ``>``; ``tests/test_schema.py`` pins that derivation.
+RETRACTED_AFTER_SUFFIX = " WHERE m.date_retracted > ? ORDER BY m.date_retracted ASC"
 THREAD_WHERE_SUFFIX = " WHERE c.guid = ?"
 THREAD_BEFORE_SUFFIX = " AND m.ROWID < ?"
 THREAD_ORDER_SUFFIX = " ORDER BY m.ROWID DESC LIMIT ?"
@@ -78,6 +86,8 @@ THREAD_ORDER_SUFFIX = " ORDER BY m.ROWID DESC LIMIT ?"
 
 MAX_ROWID = "SELECT MAX(ROWID) AS m FROM message"
 MAX_DATE_EDITED = "SELECT MAX(date_edited) AS m FROM message"
+#: Library addition (0.2): the ``date_retracted`` high-water mark, ``MAX_DATE_EDITED``'s shape.
+MAX_DATE_RETRACTED = "SELECT MAX(date_retracted) AS m FROM message"
 
 # ---- enrichment ----
 
@@ -108,6 +118,12 @@ PARTICIPANTS = """SELECT h.id AS id FROM chat_handle_join chj
 
 LAST_ROWID = """SELECT MAX(m.ROWID) AS m FROM chat_message_join cmj
            JOIN message m ON m.ROWID = cmj.message_id WHERE cmj.chat_id = ?"""
+
+#: Library addition (0.2, not a relay statement): every chat with a message
+#: ROWID past the cursor and that chat's newest ROWID, from ``chat_message_join``
+#: alone -- one range scan of its ``message_id`` index, no ``message`` join.
+CHATS_CHANGED_SINCE = """SELECT chat_id AS rid, MAX(message_id) AS last FROM chat_message_join
+           WHERE message_id > ? GROUP BY chat_id ORDER BY last DESC"""
 
 FIND_1TO1 = "SELECT ROWID AS rid, guid, chat_identifier AS ci FROM chat WHERE style = 45"
 

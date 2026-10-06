@@ -9,7 +9,7 @@ import pytest
 
 from imessage_chatdb import chats
 from imessage_chatdb.connection import open_connection
-from imessage_chatdb.models import Chat, ChatSummary, LiteMessage
+from imessage_chatdb.models import Chat, ChatActivity, ChatSummary, LiteMessage
 from tests.conftest import FixtureDB, MakeDB
 from tests.fixtures.builders import (
     BASE_DATE_NS,
@@ -213,6 +213,80 @@ def test_unread_count(fixture_db: FixtureDB, reader: sqlite3.Connection) -> None
 
 
 # ---------------------------------------------------------------------------
+# chats_changed_since
+# ---------------------------------------------------------------------------
+
+
+def test_chats_changed_since_empty_past_the_newest_rowid(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    w = fixture_db.writer
+    assert chats.chats_changed_since(reader, 0) == []  # no messages at all
+    c1 = add_chat(w, "any;-;c1", 45)
+    m = add_message(w, c1, text="a", handle=A)
+    assert chats.chats_changed_since(reader, m) == []
+    assert chats.chats_changed_since(reader, m + 1000) == []
+
+
+def test_chats_changed_since_several_chats_newest_first(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    w = fixture_db.writer
+    c1 = add_chat(w, "any;-;c1", 45)
+    c2 = add_chat(w, "any;-;c2", 45)
+    group = add_chat(w, "any;+;g", 43, handles=[A, B])
+    m1 = add_message(w, c1, text="1", handle=A)
+    add_message(w, c2, text="2", handle=B)
+    add_message(w, group, text="3", handle=A)
+    m4 = add_message(w, c2, text="4", is_from_me=1)
+    m5 = add_message(w, group, text="5", is_from_me=1)
+    m6 = add_message(w, c1, text="6", handle=A)
+
+    out = chats.chats_changed_since(reader, m1)
+    assert all(isinstance(a, ChatActivity) for a in out)
+    assert out == [
+        ChatActivity(c1, m6),
+        ChatActivity(group, m5),
+        ChatActivity(c2, m4),
+    ]
+    assert out[0].to_dict() == {"chat_rowid": c1, "last_rowid": m6}
+    # the newest ROWIDs agree with chats_by_activity's last_rowid
+    by_activity = {c.rowid: c.last_rowid for c in chats.chats_by_activity(reader)}
+    assert {a.chat_rowid: a.last_rowid for a in out} == by_activity
+
+
+def test_chats_changed_since_excludes_chats_with_only_old_messages(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    w = fixture_db.writer
+    stale = add_chat(w, "any;-;stale", 45)
+    live = add_chat(w, "any;-;live", 45)
+    add_chat(w, "any;-;empty", 45)  # no messages: never listed
+    add_message(w, stale, text="old 1", handle=A)
+    cursor = add_message(w, stale, text="old 2", handle=A)
+    m3 = add_message(w, live, text="new", handle=B)
+    unjoined = add_message(w, live, text="orphan", handle=B, join=False)
+    assert unjoined > m3
+
+    out = chats.chats_changed_since(reader, cursor)
+    assert out == [ChatActivity(live, m3)]  # stale is out; orphan rows do not count
+
+
+def test_chats_changed_since_rowid_zero_lists_every_chat_with_messages(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    w = fixture_db.writer
+    c1 = add_chat(w, "any;-;c1", 45)
+    c2 = add_chat(w, "any;-;c2", 45)
+    add_chat(w, "any;-;c3", 45)  # no messages
+    ma = add_message(w, c1, text="a", handle=A)
+    mb = add_message(w, c2, text="b", handle=B)
+    out = chats.chats_changed_since(reader, 0)
+    assert out == [ChatActivity(c2, mb), ChatActivity(c1, ma)]
+    assert [a.chat_rowid for a in out] == [c.rowid for c in chats.chats_by_activity(reader)]
+
+
+# ---------------------------------------------------------------------------
 # lite_messages
 # ---------------------------------------------------------------------------
 
@@ -302,6 +376,7 @@ def test_functions_accept_a_connection_without_row_factory(make_db: MakeDB) -> N
     add_handle(w, B)
     assert w.row_factory is None
     assert chats.chats_by_activity(w)[0].last_rowid == m
+    assert chats.chats_changed_since(w, 0) == [ChatActivity(rid, m)]
     assert chats.participants(w, rid) == [A]
     assert chats.lite_messages(w, [m])[m].text == "hi"
     assert chats.chat_services(w, [rid]) == {rid: "iMessage"}

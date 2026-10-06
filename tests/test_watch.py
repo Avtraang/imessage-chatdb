@@ -58,7 +58,7 @@ def seeded(fixture_db: FixtureDB) -> tuple[FixtureDB, int, int]:
 
 def test_cursor_defaults_frozen_and_json_round_trip() -> None:
     c = Cursor()
-    assert (c.rowid, c.edit_mark) == (0, 0)
+    assert (c.rowid, c.edit_mark, c.retract_mark) == (0, 0, 0)
     assert dataclasses.is_dataclass(c)
     with pytest.raises(dataclasses.FrozenInstanceError):
         c.rowid = 5  # type: ignore[misc]
@@ -66,13 +66,14 @@ def test_cursor_defaults_frozen_and_json_round_trip() -> None:
 
     c = Cursor(rowid=42, edit_mark=EDIT_A)
     d = c.to_json()
-    assert d == {"rowid": 42, "edit_mark": EDIT_A}
+    assert d == {"rowid": 42, "edit_mark": EDIT_A, "retract_mark": 0}
     assert Cursor.from_json(d) == c
     assert isinstance(Cursor.from_json(d).edit_mark, int)
-    # tolerant of missing / null keys (a fresh state file)
+    # tolerant of missing / null keys (a fresh state file, or one written by 0.1)
     assert Cursor.from_json({}) == Cursor()
     assert Cursor.from_json({"rowid": None, "edit_mark": None}) == Cursor()
     assert Cursor.from_json({"rowid": "7"}) == Cursor(rowid=7)
+    assert Cursor.from_json({"rowid": 42, "edit_mark": EDIT_A}) == c  # 0.1 state file
 
 
 def test_event_is_frozen_slotted(seeded: tuple[FixtureDB, int, int]) -> None:
@@ -735,7 +736,7 @@ def test_run_watch_event_order_and_persistence_round_trip(
         stop=stop,
         sleep=lambda _s: stop.set(),
     )
-    assert saved == [{"rowid": c, "edit_mark": 0}]
+    assert saved == [{"rowid": c, "edit_mark": 0, "retract_mark": 0}]
     # resuming from the persisted cursor replays nothing
     assert poll_once(fx.db, Cursor.from_json(saved[0])) == ([], Cursor(rowid=c))
     assert a < c

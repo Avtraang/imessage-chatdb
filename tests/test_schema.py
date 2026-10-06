@@ -32,7 +32,11 @@ _NOT_IN_SQL_MODULE = {"MESSAGE_SELECT", "LINK_BALLOON"}
 
 # sql.py constants that are library additions derived from a relay statement
 # (no golden copy; their derivation is pinned below instead).
-_DERIVED = {"SEARCH_IN_CHAT"}
+_DERIVED = {"SEARCH_IN_CHAT", "RETRACTED_AFTER_SUFFIX", "MAX_DATE_RETRACTED"}
+
+# sql.py constants that are library additions with no relay ancestor at all
+# (no golden copy; their shape is pinned below instead).
+_LIBRARY_ADDITIONS = {"CHATS_CHANGED_SINCE"}
 
 
 def _sql_constants() -> list[str]:
@@ -40,8 +44,33 @@ def _sql_constants() -> list[str]:
 
 
 def test_every_sql_constant_has_a_golden_entry() -> None:
-    assert set(_sql_constants()) - _DERIVED == set(golden.GOLDEN) - _NOT_IN_SQL_MODULE
+    assert (
+        set(_sql_constants()) - _DERIVED - _LIBRARY_ADDITIONS
+        == set(golden.GOLDEN) - _NOT_IN_SQL_MODULE
+    )
     assert _DERIVED.isdisjoint(golden.GOLDEN)  # a derived statement is never "golden"
+    assert _LIBRARY_ADDITIONS.isdisjoint(golden.GOLDEN)
+
+
+def test_retraction_statements_are_the_edit_statements_on_date_retracted() -> None:
+    """The unsend tail and mark (0.2) are the relay's edit statements with
+    ``date_retracted`` substituted for ``date_edited`` and nothing else changed."""
+    assert sql.RETRACTED_AFTER_SUFFIX == sql.EDITED_AFTER_SUFFIX.replace(
+        "date_edited", "date_retracted"
+    )
+    assert sql.MAX_DATE_RETRACTED == sql.MAX_DATE_EDITED.replace("date_edited", "date_retracted")
+    assert "date_edited" not in sql.RETRACTED_AFTER_SUFFIX + sql.MAX_DATE_RETRACTED
+    assert sql.RETRACTED_AFTER_SUFFIX.count("?") == 1 and sql.MAX_DATE_RETRACTED.count("?") == 0
+
+
+def test_chats_changed_since_reads_the_join_table_only() -> None:
+    """One ``chat_message_join`` scan: no ``message``/``chat`` join, one parameter,
+    grouped by chat, newest activity first."""
+    s = " ".join(sql.CHATS_CHANGED_SINCE.split())
+    assert s.count("FROM") == 1 and "FROM chat_message_join" in s
+    assert "JOIN message" not in s and "JOIN chat " not in s
+    assert s.count("?") == 1 and "WHERE message_id > ?" in s
+    assert "GROUP BY chat_id" in s and "ORDER BY last DESC" in s
 
 
 def test_search_in_chat_is_search_plus_one_guid_line() -> None:

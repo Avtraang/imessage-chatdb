@@ -4,7 +4,7 @@
 
 Read-only, standard-library-only reader for Apple Messages' `chat.db`
 (`~/Library/Messages/chat.db`). Open the database safely, tail new messages
-from a ROWID cursor, detect edits, decode `attributedBody`, classify tapbacks,
+from a ROWID cursor, detect edits and unsends, decode `attributedBody`, classify tapbacks,
 follow replies, read link previews, list attachments and chats, and search —
 in a few dozen lines, with no dependencies.
 
@@ -150,8 +150,10 @@ replays the whole group on restart (the handled members again, never the
 unhandled ones skipped).
 
 `watch(None)` starts at *now* (no replay), opens a fresh connection per round,
-yields `"new"` events before `"edited"` events within a round, and simply
-yields nothing in a round where the database is busy. The polling code lives
+yields `"new"` events before `"edited"` events within a round (and
+`"retracted"` events after both, once you opt in with
+`include_retractions=True`; see "Unsends" below), and simply yields nothing in
+a round where the database is busy. The polling code lives
 in `imessage_chatdb.polling`; `watch`, `run_watch`, `poll_once`, `Cursor` and
 `Event` are all re-exported, so `from imessage_chatdb import watch` is the
 generator function and `db.watch(...)` is the same thing.
@@ -169,12 +171,13 @@ from imessage_chatdb import Cursor
 
 db = imessage_chatdb.open(DB_PATH)
 
-cursor = db.initial_cursor()                     # Cursor(rowid=MAX(ROWID), edit_mark=MAX(date_edited))
+cursor = db.initial_cursor()                     # Cursor(rowid=MAX(ROWID), edit_mark=MAX(date_edited),
+                                                 #        retract_mark=MAX(date_retracted))
 events, cursor = db.poll(cursor)                 # one round; [] when nothing changed
 for ev in events:
     print(ev.kind, ev.message.rowid, ev.message.clean_text)
 
-state = json.dumps(cursor.to_json())             # {"rowid": ..., "edit_mark": ...}
+state = json.dumps(cursor.to_json())             # {"rowid": ..., "edit_mark": ..., "retract_mark": ...}
 cursor = Cursor.from_json(json.loads(state))     # next run picks up where this one stopped
 print(cursor)
 ```
@@ -202,6 +205,39 @@ returns `"edited"` events for rows past it and never lets the mark regress.
 On a macOS without the column, no edit events are produced (and `edit_mark`
 stays 0).
 
+### Unsends via `date_retracted`
+
+An unsend ("Undo Send") does not delete the row: Messages.app keeps it, sets
+`date_retracted` and, by all reports, clears its text. The cursor's third
+field, `retract_mark`, is the highest raw `date_retracted` seen; with
+`include_retractions=True` on `poll()` / `watch()` / `run_watch()`, a round
+returns `"retracted"` events for rows past it, after the round's `"edited"`
+events, and never lets the mark regress. **The kind is off by default**, so a
+consumer that only knows `"new"` and `"edited"` keeps seeing exactly that
+stream (0.2 is additive); while it is off the mark does not move, and
+switching it on later delivers the unsends missed meanwhile. The event carries
+the row *as it is now* — `message.text` is typically `None` — so handle it by
+`rowid` or `guid`: remove or mark the message you delivered earlier; do not
+expect its content. Ties on `date_retracted` replay as a group exactly like
+edit ties. The column exists on macOS 26+; on older databases no `"retracted"`
+events are produced and `retract_mark` stays 0. A cursor saved by 0.1 has no
+`retract_mark` key and loads as 0, which replays every past unsend once — take
+`db.initial_cursor()` instead if you would rather skip them.
+
+```python
+# doctest-fixture
+import imessage_chatdb
+from imessage_chatdb import Cursor
+
+db = imessage_chatdb.open(DB_PATH)
+cursor = Cursor(rowid=db.max_rowid(), edit_mark=db.max_date_edited())  # retract_mark=0: replay unsends
+events, cursor = db.poll(cursor, include_retractions=True)
+for ev in events:
+    if ev.kind == "retracted":                   # the row as it is now; text is usually None
+        print("unsent", ev.message.rowid, ev.message.guid, ev.message.text)
+print(cursor.retract_mark)                       # the mark to persist; 0 on macOS < 26
+```
+
 ### Apple dates and the `0` sentinel
 
 `message.date*` are nanoseconds since 2001-01-01 (older databases stored
@@ -226,6 +262,44 @@ text: the `text` column when non-empty, else the string extracted from the
 blob. `Message.text_column` keeps the raw column and `Message.clean_text`
 strips U+FFFC attachment placeholders and collapses whitespace. The extractor
 never raises; undecodable blobs give `None`.
+
+### Attribute runs, mentions, links and attachment parts (0.2)
+
+`Message.body` parses the whole archive with the typedstream reader
+(`imessage_chatdb.typedstream_reader`, specified in `docs/TYPEDSTREAM.md`):
+the text plus every attribute run with its UTF-16 offsets and attribute
+dictionary. `Message.parts` groups the runs into `AttachmentPart` (a U+FFFC
+placeholder carrying its attachment guid), `TextPart` (text with `Mention`
+spans and link URLs) and `UnknownPart`. Both are computed on first access,
+cached, and never raise: a blob the reader rejects gives `body is None` and
+`parts == ()` while `text` is still the byte-scan result. `to_dict()` is
+unchanged; the CLI adds the same view with `tail --parts` / `search --parts`.
+
+```python
+# doctest-fixture
+import imessage_chatdb
+from imessage_chatdb import AttachmentPart, TextPart, parse_attributed_body
+
+db = imessage_chatdb.open(DB_PATH)
+for m in db.messages_after(0):
+    for part in m.parts:                         # () when the row has no parsable blob
+        if isinstance(part, AttachmentPart):
+            print("attachment", part.guid)
+        elif isinstance(part, TextPart):
+            print("text", part.text, [x.handle for x in part.mentions], part.links)
+
+blob = next(m.attributed_body_raw for m in db.messages_after(0) if m.body is not None)
+body = parse_attributed_body(blob)               # raises TypedStreamError on a malformed blob
+for run in body.runs:                            # offsets are UTF-16 code units; chars() gives code points
+    print(run.start, run.end, run.chars(body.text), dict(run.attributes))
+```
+
+The reader is hardened against crafted blobs: every depth (object nesting,
+class-chain length, nesting of converted values through back-references) is
+bounded by counting rather than by the interpreter's recursion limit, each
+archived object is converted once however many runs reference it, and
+`message_parts` is linear in the text plus the runs. A known attribute class
+with an unexpected layout becomes `UnknownValue` rather than costing the text.
 
 ### Tapbacks (including macOS 26+ emoji)
 
@@ -531,6 +605,9 @@ is_archived, is_filtered, group_id`; properties `is_group`, `chat_name`.
 **`ChatMatch`** (`db.find_chat`) — `chat_rowid, chat_guid, chat_identifier,
 display_name, is_group, last_rowid`.
 
+**`ChatActivity`** (`db.chats_changed_since`) — `chat_rowid, last_rowid`: a
+chat that gained messages past a ROWID cursor and its newest ROWID (section 7).
+
 **`SearchHit`** (`db.search`) — `rowid, chat_rowid, chat_guid, chat_identifier,
 chat_display_name, is_group, date, is_from_me, sender_handle, text, match_index`.
 
@@ -539,9 +616,10 @@ chat_display_name, is_group, date, is_from_me, sender_handle, text, match_index`
 **`Reaction`** — `action ("add"|"remove"), kind, emoji, raw_type, target_guid,
 target_part, is_balloon`.
 
-**`Cursor`** — `rowid, edit_mark`; `to_json()` / `Cursor.from_json()`.
-**`Event`** — `kind ("new"|"edited")`, `message`, `cursor` (the `Cursor` to
-persist once this event has been handled). All from `imessage_chatdb.polling`,
+**`Cursor`** — `rowid, edit_mark, retract_mark`; `to_json()` /
+`Cursor.from_json()` (a missing `retract_mark` reads as 0).
+**`Event`** — `kind ("new"|"edited"|"retracted")`, `message`, `cursor` (the
+`Cursor` to persist once this event has been handled). All from `imessage_chatdb.polling`,
 re-exported with `poll_once`, `watch` and `run_watch`.
 
 Pure helpers: `apple_to_unix`, `unix_to_apple`, `apple_to_datetime`,
@@ -563,12 +641,49 @@ several of them on one connection.
   adds exactly one attachments query (only for rows with attachments) and one
   reply-target query per batch.
 - `chats()` is a `GROUP BY` over `chat_message_join` — O(messages). Fine at
-  20k rows; at 500k+ cache it.
+  20k rows; at 500k+ cache it and keep the cache fresh with
+  `chats_changed_since(rowid)` instead of calling `chats()` again (below).
 - `search()` is a full scan with a `LIKE` and four `instr()` passes over the
   blobs. Keep `limit` modest and scope by chat where you can; an FTS index is
   impossible on a read-only database.
 - Nothing is cached across calls except the `Schema`; call
   `db.refresh_schema()` after a macOS upgrade.
+
+### Keeping a cached chat list fresh
+
+`chats_changed_since(rowid)` reads `chat_message_join` alone
+(`SELECT chat_id, MAX(message_id) ... WHERE message_id > ? GROUP BY chat_id`:
+one range scan of the `message_id` index, no `message` or `chat` join), so its
+cost is proportional to the messages *since your cursor*, not to the database.
+Each `ChatActivity(chat_rowid, last_rowid)` names a chat that gained messages
+and its newest ROWID — the same `last_rowid` a `ChatSummary` carries — so you
+re-sort the cached list by it, and only a `chat_rowid` you have never seen
+needs one `chat_by_rowid()` lookup:
+
+```python
+# doctest-fixture
+import imessage_chatdb
+
+db = imessage_chatdb.open(DB_PATH)
+with db.connection():
+    cached = {c.rowid: c for c in db.chats()}        # the one full GROUP BY
+    cursor = db.max_rowid()
+
+# ... later, after new messages arrived (or on every poll round) ...
+for activity in db.chats_changed_since(cursor):      # newest activity first
+    known = cached.get(activity.chat_rowid)
+    if known is None:                                # a brand-new chat: one row lookup
+        print("new chat", db.chat_by_rowid(activity.chat_rowid))
+    else:
+        print("bump", known.chat_name, known.last_rowid, "->", activity.last_rowid)
+    cursor = max(cursor, activity.last_rowid)
+print("cursor", cursor)
+```
+
+It only reports *new* messages (ROWID order). An edit, a tapback on an old
+message or an unsend creates no new ROWID in that chat, so a chat list that
+shows previews still watches `poll()` for those; and a chat whose join rows are
+all older than `rowid` is simply absent from the result.
 
 ## 8. Safety
 
@@ -609,9 +724,9 @@ relay's partial string, while a blob cut only in the trailer *after* the text
 still decodes to the complete text; every real blob carries its trailer, so
 this only matters for corrupt rows.
 
-Not in v0.1: a full typedstream parts reader, edit history from
-`message_summary_info`, retraction events (`date_retracted` is exposed as a
-field only), FTS.
+Not yet: edit history from `message_summary_info`, FTS. (The typedstream
+parts reader and unsend events arrived in 0.2.0; see "Attribute runs, mentions,
+links and attachment parts" and "Unsends via `date_retracted`" above.)
 
 ## 10. Contributing
 

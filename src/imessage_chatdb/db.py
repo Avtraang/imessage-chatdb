@@ -34,6 +34,7 @@ from .link_preview import embedded_image
 from .models import (
     Attachment,
     Chat,
+    ChatActivity,
     ChatMatch,
     ChatSummary,
     LiteMessage,
@@ -156,12 +157,18 @@ class ChatDB:
         with self.connection() as conn:
             return _messages.max_date_edited(conn, self.schema)
 
+    def max_date_retracted(self) -> int:
+        with self.connection() as conn:
+            return _messages.max_date_retracted(conn, self.schema)
+
     def initial_cursor(self) -> Cursor:
-        """``Cursor(max_rowid(), max_date_edited())`` - "now", read on one connection."""
+        """``Cursor(max_rowid(), max_date_edited(), max_date_retracted())`` - "now", read on
+        one connection."""
         with self.connection() as conn:
             return Cursor(
                 rowid=_messages.max_rowid(conn),
                 edit_mark=_messages.max_date_edited(conn, self.schema),
+                retract_mark=_messages.max_date_retracted(conn, self.schema),
             )
 
     # -- messages -----------------------------------------------------------
@@ -183,6 +190,12 @@ class ChatDB:
     def messages_edited_after(self, mark: int, *, enrich: bool = True) -> tuple[list[Message], int]:
         with self.connection() as conn:
             return _messages.messages_edited_after(conn, self.schema, mark, enrich=enrich)
+
+    def messages_retracted_after(
+        self, mark: int, *, enrich: bool = True
+    ) -> tuple[list[Message], int]:
+        with self.connection() as conn:
+            return _messages.messages_retracted_after(conn, self.schema, mark, enrich=enrich)
 
     def thread_messages(
         self,
@@ -283,6 +296,11 @@ class ChatDB:
         with self.connection() as conn:
             return _chats.last_rowid_for(conn, chat_rowid)
 
+    def chats_changed_since(self, rowid: int) -> list[ChatActivity]:
+        """Chats with a message past ``rowid`` (``chats_changed_since``), newest first."""
+        with self.connection() as conn:
+            return _chats.chats_changed_since(conn, rowid)
+
     def unread_count(self, chat_rowid: int, after_rowid: int, *, incoming_only: bool = True) -> int:
         with self.connection() as conn:
             return _chats.unread_count(conn, chat_rowid, after_rowid, incoming_only=incoming_only)
@@ -316,9 +334,17 @@ class ChatDB:
 
     # -- watching -----------------------------------------------------------
 
-    def poll(self, cursor: Cursor, *, include_edits: bool = True) -> tuple[list[Event], Cursor]:
+    def poll(
+        self,
+        cursor: Cursor,
+        *,
+        include_edits: bool = True,
+        include_retractions: bool = False,
+    ) -> tuple[list[Event], Cursor]:
         """One polling round (:func:`imessage_chatdb.polling.poll_once`)."""
-        return poll_once(self, cursor, include_edits=include_edits)
+        return poll_once(
+            self, cursor, include_edits=include_edits, include_retractions=include_retractions
+        )
 
     def watch(
         self,
@@ -327,11 +353,18 @@ class ChatDB:
         interval: float = 2.0,
         stop: threading.Event | None = None,
         include_edits: bool = True,
+        include_retractions: bool = False,
         sleep: Callable[[float], object] = time.sleep,
     ) -> Iterator[Event]:
         """Yield events forever (:func:`imessage_chatdb.polling.watch`)."""
         return _watch(
-            self, cursor, interval=interval, stop=stop, include_edits=include_edits, sleep=sleep
+            self,
+            cursor,
+            interval=interval,
+            stop=stop,
+            include_edits=include_edits,
+            include_retractions=include_retractions,
+            sleep=sleep,
         )
 
 

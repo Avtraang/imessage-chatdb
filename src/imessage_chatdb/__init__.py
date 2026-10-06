@@ -38,6 +38,7 @@ from .link_preview import (
 from .models import (
     Attachment,
     Chat,
+    ChatActivity,
     ChatMatch,
     ChatSummary,
     LiteMessage,
@@ -51,8 +52,23 @@ from .schema import OPTIONAL, REQUIRED, Schema, build_message_select
 from .search import extract_urls, snippet
 from .services import Service, normalize_service, service_family
 from .typedstream import clean_text, effective_text, extract_text
+from .typedstream_reader import (
+    AttachmentPart,
+    AttributedBody,
+    AttributeRun,
+    Mention,
+    Part,
+    TextPart,
+    TypedStreamError,
+    UnknownPart,
+    UnknownValue,
+    Url,
+    message_parts,
+    parse_attributed_body,
+    try_parse_attributed_body,
+)
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
@@ -80,6 +96,20 @@ __all__ = [
     "extract_text",
     "effective_text",
     "clean_text",
+    # typedstream reader (``imessage_chatdb.typedstream_reader``)
+    "TypedStreamError",
+    "AttributedBody",
+    "AttributeRun",
+    "Url",
+    "UnknownValue",
+    "Mention",
+    "TextPart",
+    "AttachmentPart",
+    "UnknownPart",
+    "Part",
+    "parse_attributed_body",
+    "try_parse_attributed_body",
+    "message_parts",
     # keyed archive
     "KeyedArchive",
     # link preview
@@ -113,6 +143,7 @@ __all__ = [
     "Chat",
     "ChatSummary",
     "ChatMatch",
+    "ChatActivity",
     "SearchHit",
     # polling (``imessage_chatdb.polling``)
     "Cursor",

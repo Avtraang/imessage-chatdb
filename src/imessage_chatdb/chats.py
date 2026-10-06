@@ -4,7 +4,7 @@ Every function takes an open ``sqlite3.Connection`` and returns plain facts
 from the ``chat`` side of the schema.  Statements whose row order or row set is
 JSON-visible in the relay are executed verbatim from :mod:`imessage_chatdb.sql`
 (``THREADS``, ``PARTICIPANTS``, ``PARTICIPANTS_MAP``, ``CHAT_SERVICES``,
-``UNREAD``, ``LAST_ROWID``, ``LITE_MESSAGES``, ``FIND_1TO1``,
+``UNREAD``, ``LAST_ROWID``, ``CHATS_CHANGED_SINCE``, ``LITE_MESSAGES``, ``FIND_1TO1``,
 ``FIND_GROUP_JOINS``, ``FIND_GROUP_SENDERS``, ``ONE_TO_ONE_ACTIVITY``).  The
 optional ``chat`` columns (``service_name``, ``is_archived``, ``is_filtered``,
 ``group_id``) are read through a small schema-tolerant SELECT of their own, so
@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable, Sequence
 from . import sql
 from .attachments import attachments_for
 from .handles import address_key
-from .models import Chat, ChatMatch, ChatSummary, LiteMessage
+from .models import Chat, ChatActivity, ChatMatch, ChatSummary, LiteMessage
 from .services import service_family
 from .typedstream import clean_text, effective_text
 
@@ -34,6 +34,7 @@ __all__ = [
     "participants_map",
     "chat_services",
     "last_rowid_for",
+    "chats_changed_since",
     "unread_count",
     "lite_messages",
     "one_to_one_activity",
@@ -212,6 +213,25 @@ def last_rowid_for(conn: sqlite3.Connection, chat_rowid: int) -> int:
     """``MAX(m.ROWID)`` of the chat's messages, ``0`` when it has none."""
     rows = _rows(conn, sql.LAST_ROWID, (chat_rowid,))
     return int(rows[0]["m"] or 0) if rows else 0
+
+
+def chats_changed_since(conn: sqlite3.Connection, rowid: int) -> list[ChatActivity]:
+    """Every chat with at least one message ``ROWID > rowid``, with its newest ROWID.
+
+    Read from ``chat_message_join`` alone (``CHATS_CHANGED_SINCE``: one range
+    scan of the ``message_id`` index, ``GROUP BY chat_id``), so the cost is
+    proportional to the number of messages *after* the cursor, not to the
+    size of the database -- unlike :func:`chats_by_activity`, which groups
+    the whole join table.  Newest activity first (``last_rowid DESC``);
+    ``rowid=0`` lists every chat that has messages; a ``rowid`` at or past
+    ``max_rowid()`` yields ``[]``.  A chat row that was deleted but whose join
+    rows linger is still reported (there is no ``chat`` join to drop it);
+    ``chat_by_rowid`` returns ``None`` for it.
+    """
+    return [
+        ChatActivity(chat_rowid=int(r["rid"]), last_rowid=int(r["last"]))
+        for r in _rows(conn, sql.CHATS_CHANGED_SINCE, (rowid,))
+    ]
 
 
 def unread_count(

@@ -1,7 +1,7 @@
 """Fuzz tests for the decoders (DESIGN.md 8.4 fuzz; T9).
 
 Three seeded generators, 2,000 iterations each, feed ``extract_text``,
-``parse_link_preview`` and ``embedded_image``:
+``try_parse_attributed_body``, ``parse_link_preview`` and ``embedded_image``:
 
 1. random bytes of random length;
 2. bit-flipped copies of *valid* blobs (typedstream bodies from
@@ -25,6 +25,7 @@ import pytest
 
 from imessage_chatdb.link_preview import LinkPreview, embedded_image, parse_link_preview
 from imessage_chatdb.typedstream import extract_text
+from imessage_chatdb.typedstream_reader import AttributedBody, try_parse_attributed_body
 from tests.fixtures.keyed_archive_writer import (
     build_link_archive,
     dump_archive,
@@ -40,6 +41,7 @@ Decoder = Callable[[bytes | None], object]
 
 DECODERS: dict[str, tuple[Decoder, type | tuple[type, ...]]] = {
     "extract_text": (extract_text, str),
+    "try_parse_attributed_body": (try_parse_attributed_body, AttributedBody),
     "parse_link_preview": (parse_link_preview, LinkPreview),
     "embedded_image": (embedded_image, bytes),
 }

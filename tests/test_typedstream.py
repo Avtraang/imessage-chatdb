@@ -439,3 +439,206 @@ def test_clean_text_of_extracted_placeholder_is_empty() -> None:
     blob = encode_attributed_body("￼")
     assert extract_text(blob) == "￼"
     assert clean_text(effective_text(None, blob)) == ""
+
+
+# ---------- 0.2 writer: encode_attributed_body_runs (docs/TYPEDSTREAM.md section 8) ----------
+
+from tests.fixtures.typedstream_writer import (  # noqa: E402
+    FILE_TRANSFER_GUID,
+    LINK,
+    LINK_IS_RICH,
+    MENTION,
+    MUTABLE_ROOT_SKELETON,
+    PART,
+    URL,
+    WRITING_DIRECTION,
+    Number,
+    encode_attributed_body_runs,
+    encode_sint,
+)
+
+GOLDEN_PLAIN_HI = (
+    "040b73747265616d747970656481e803840140848484124e5341747472696275746564537472696e6700"
+    "8484084e534f626a656374008592848484084e53537472696e67019484012b0268698684026949010292"
+    "8484840c4e5344696374696f6e617279009484016901928496961d5f5f6b494d4d657373616765506172"
+    "744174747269627574654e616d658692848484084e534e756d626572008484074e5356616c7565009484"
+    "012a84999900868686"
+)
+GOLDEN_MUTABLE_HI = (
+    "040b73747265616d747970656481e803840140848484194e534d757461626c65417474726962757465"
+    "64537472696e67008484124e5341747472696275746564537472696e67008484084e534f626a65637400"
+    "85928484840f4e534d757461626c65537472696e67018484084e53537472696e67019584012b02686986"
+    "840269490102928484840c4e5344696374696f6e617279009584016901928498981d5f5f6b494d4d6573"
+    "73616765506172744174747269627574654e616d658692848484084e534e756d626572008484074e5356"
+    "616c7565009584012a849b9b00868686"
+)
+GOLDEN_THREE_PARTS = (
+    "040b73747265616d747970656481e803840140848484194e534d757461626c65417474726962757465"
+    "64537472696e67008484124e5341747472696275746564537472696e67008484084e534f626a65637400"
+    "85928484840f4e534d757461626c65537472696e67018484084e53537472696e67019584012b23efbfbc"
+    "20736565204053616d2068747470733a2f2f6578616d706c652e746573742f7886840269490101928484"
+    "840c4e5344696374696f6e61727900958401690392849898225f5f6b494d46696c655472616e73666572"
+    "475549444174747269627574654e616d6586928498981341545f305f303030302d46414b452d47554944"
+    "8692849898265f5f6b494d4261736557726974696e67446972656374696f6e4174747269627574654e61"
+    "6d658692848484084e534e756d626572008484074e5356616c7565009584012a848401719fff86928498"
+    "981d5f5f6b494d4d657373616765506172744174747269627574654e616d658692849f9e849b9b008686"
+    "99020592849a9b01928498981d5f5f6b494d4d657373616765506172744174747269627574654e616d65"
+    "8692849f9ea49b01868699030492849a9b02928498981d5f5f6b494d4d65737361676550617274417474"
+    "7269627574654e616d658692a7928498981c5f5f6b494d4d656e74696f6e436f6e6669726d65644d656e"
+    "74696f6e8692849898092b3135353530313030868699020199041692849a9b0392849898165f5f6b494d"
+    "4c696e6b4174747269627574654e616d658692848484054e5355524c009584016300928498981668747470"
+    "733a2f2f6578616d706c652e746573742f788686928498981d5f5f6b494d4d657373616765506172744174"
+    "747269627574654e616d658692a792849898205f5f6b494d4c696e6b4973526963684c696e6b41747472"
+    "69627574654e616d658692849f9e84a1a101868686"
+)
+
+THREE_PARTS_TEXT = "￼ see @Sam https://example.test/x"
+THREE_PARTS_RUNS: list[tuple[int, dict[str, object]]] = [
+    (1, {FILE_TRANSFER_GUID: "AT_0_0000-FAKE-GUID", WRITING_DIRECTION: Number(-1, "q"), PART: 0}),
+    (5, {PART: 1}),
+    (4, {PART: 1, MENTION: "+15550100"}),
+    (1, {PART: 1}),
+    (22, {LINK: URL("https://example.test/x"), PART: 1, LINK_IS_RICH: True}),
+]
+
+
+def test_runs_writer_golden_plain_single_run() -> None:
+    blob = encode_attributed_body_runs("hi", [(2, {PART: 0})])
+    assert blob.hex() == GOLDEN_PLAIN_HI
+    assert len(blob) == 177
+    assert blob.startswith(PLAIN_SKELETON)
+    assert extract_text(blob) == "hi"
+
+
+def test_runs_writer_golden_mutable_single_run() -> None:
+    blob = encode_attributed_body_runs("hi", [(2, {PART: 0})], mutable=True)
+    assert blob.hex() == GOLDEN_MUTABLE_HI
+    assert len(blob) == 225
+    assert blob.startswith(MUTABLE_ROOT_SKELETON)
+    assert not blob.startswith(MUTABLE_SKELETON)
+    assert extract_text(blob) == "hi"
+
+
+def test_runs_writer_golden_three_parts() -> None:
+    blob = encode_attributed_body_runs(THREE_PARTS_TEXT, THREE_PARTS_RUNS, mutable=True)
+    assert blob.hex() == GOLDEN_THREE_PARTS
+    assert len(blob) == 694
+    assert extract_text(blob) == THREE_PARTS_TEXT
+    # run 2 is (dictionary 2, length 5); run 4 re-uses dictionary 2 with no dictionary after it
+    assert b"\x99\x02\x05\x92" in blob
+    assert b"\x99\x02\x01\x99\x04\x16" in blob  # run 5's "iI" follows directly
+    # the NSNumber(1) archived in run 2's dictionary is a single reference byte after
+    # type "@" in the dictionaries of runs 3 and 5
+    assert blob.count(b"\x92\xa7") == 2
+    assert blob.count(b"__kIMMessagePartAttributeName") == 4  # keys are fresh by default
+
+
+def test_runs_writer_share_keys_references_the_key_object() -> None:
+    fresh = encode_attributed_body_runs(THREE_PARTS_TEXT, THREE_PARTS_RUNS, mutable=True)
+    shared = encode_attributed_body_runs(
+        THREE_PARTS_TEXT, THREE_PARTS_RUNS, mutable=True, share_keys=True
+    )
+    assert len(shared) == 595 == len(fresh) - 99
+    assert shared.count(b"__kIMMessagePartAttributeName") == 1
+    assert shared.count(b"\x92\xa2") == 3  # type "@" + reference to the first key object
+    assert extract_text(shared) == THREE_PARTS_TEXT
+
+
+def test_runs_writer_share_values_off_archives_numbers_again() -> None:
+    runs: list[tuple[int, dict[str, object]]] = [(1, {PART: 0}), (1, {PART: 1}), (1, {PART: 0})]
+    on = encode_attributed_body_runs("abc", runs)
+    off = encode_attributed_body_runs("abc", runs, share_values=False)
+    # dictionary 3 equals dictionary 1, so both writers emit a back-reference (1, 1) and
+    # no third dictionary; only the NSNumber sharing inside dictionary 2 differs.
+    assert on.endswith(b"\x97\x01\x01\x86")  # type "iI" is S[5] in a plain blob
+    assert off.endswith(b"\x97\x01\x01\x86")
+    assert on.count(b"NSNumber") == 1 == off.count(b"NSNumber")
+    assert on == off  # values 0 and 1 differ, so nothing was shared either way
+    bold = "__kIMTextBoldAttributeName"
+    same: list[tuple[int, dict[str, object]]] = [(1, {PART: 0}), (1, {bold: 0})]
+    assert len(encode_attributed_body_runs("ab", same)) < len(
+        encode_attributed_body_runs("ab", same, share_values=False)
+    )
+
+
+def test_runs_writer_equal_dictionaries_archived_once() -> None:
+    blob = encode_attributed_body_runs("abcd", [(2, {PART: 0}), (2, {PART: 0})])
+    assert blob.count(b"NSDictionary") == 1
+    assert blob.endswith(b"\x97\x01\x02\x86")  # type "iI" ref, index 1, length 2, end root
+
+
+def test_runs_writer_matches_0_1_writer_except_documented_bytes() -> None:
+    """The 0.1 writer differs from the live bytes only where section 7 says."""
+    old = encode_attributed_body("a")
+    new = encode_attributed_body_runs("a", [(1, {PART: 0})])
+    assert len(old) == len(new)
+    diffs = [i for i, (x, y) in enumerate(zip(old, new, strict=True)) if x != y]
+    assert len(diffs) == 1
+    assert old[diffs[0]] == 0x97 and new[diffs[0]] == 0x96
+    # with a two-unit text the (length, 1) vs (1, length) order shows as well
+    old2 = encode_attributed_body("ab")
+    new2 = encode_attributed_body_runs("ab", [(2, {PART: 0})])
+    diffs2 = [i for i, (x, y) in enumerate(zip(old2, new2, strict=True)) if x != y]
+    assert len(diffs2) == 3
+    assert old2[diffs2[0] : diffs2[0] + 2] == b"\x02\x01"
+    assert new2[diffs2[0] : diffs2[0] + 2] == b"\x01\x02"
+
+
+@pytest.mark.parametrize("mutable", [False, True])
+@pytest.mark.parametrize("n", [1, 127, 128, 146, 255, 256, 65535, 65536, 70_000])
+def test_runs_writer_text_lengths_agree_with_extract_text(n: int, mutable: bool) -> None:
+    text = ("x" * (n - 1) + "Z") if n > 1 else "Z"
+    blob = encode_attributed_body_runs(text, [(n, {PART: 0})], mutable=mutable)
+    skeleton = MUTABLE_ROOT_SKELETON if mutable else PLAIN_SKELETON
+    assert blob.startswith(skeleton)
+    assert blob[len(skeleton) :].startswith(encode_int(n))
+    assert extract_text(blob) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["\U0001f600\U0001f44d", "שלום", "café — שלום \U0001f600", "￼", "a" * 43, ""],
+)
+def test_runs_writer_unicode_and_utf16_lengths(text: str) -> None:
+    units = len(text.encode("utf-16-le")) // 2
+    blob = encode_attributed_body_runs(text, [(units, {PART: 0})])
+    assert extract_text(blob) == (text or None)
+    with pytest.raises(ValueError):
+        encode_attributed_body_runs(text, [(units + 1, {PART: 0})])
+
+
+def test_runs_writer_rejects_bad_input() -> None:
+    with pytest.raises(ValueError):
+        encode_attributed_body_runs("ab", [(1, {PART: 0})])
+    with pytest.raises(ValueError):
+        encode_attributed_body_runs("ab", [(3, {PART: 0}), (-1, {PART: 0})])
+    with pytest.raises(TypeError):
+        encode_attributed_body_runs("a", [(1, {PART: 1.5})])
+    with pytest.raises(ValueError):
+        encode_attributed_body_runs("a", [(1, {PART: Number(1, "d")})])
+    with pytest.raises(ValueError):
+        encode_attributed_body_runs("a", [(1, {PART: Number(300, "c")})])
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0, b"\x00"),
+        (127, b"\x7f"),
+        (-1, b"\xff"),
+        (-110, b"\x92"),
+        (-111, b"\x81\x91\xff"),
+        (-128, b"\x81\x80\xff"),
+        (128, b"\x81\x80\x00"),
+        (32767, b"\x81\xff\x7f"),
+        (32768, b"\x82\x00\x80\x00\x00"),
+        (-32769, b"\x82\xff\x7f\xff\xff"),
+    ],
+)
+def test_encode_sint(value: int, expected: bytes) -> None:
+    assert encode_sint(value) == expected
+
+
+def test_encode_sint_rejects_int64() -> None:
+    with pytest.raises(ValueError):
+        encode_sint(1 << 31)

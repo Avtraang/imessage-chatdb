@@ -274,3 +274,21 @@ def set_date_edited(conn: sqlite3.Connection, msg_rowid: int, date_edited: int) 
     """Bump ``message.date_edited`` in place (no-op when the column is absent)."""
     if has_column(conn, "message", "date_edited"):
         conn.execute("UPDATE message SET date_edited = ? WHERE ROWID = ?", (date_edited, msg_rowid))
+
+
+def set_date_retracted(
+    conn: sqlite3.Connection, msg_rowid: int, date_retracted: int, *, clear_text: bool = False
+) -> None:
+    """Mark a message unsent: set ``message.date_retracted`` in place (no-op when the
+    column is absent).  ``clear_text=True`` also NULLs ``text`` and ``attributedBody``,
+    which is what Messages.app is reported to do on an unsend (the row stays).
+    """
+    if not has_column(conn, "message", "date_retracted"):
+        return
+    conn.execute(
+        "UPDATE message SET date_retracted = ? WHERE ROWID = ?", (date_retracted, msg_rowid)
+    )
+    if clear_text:
+        conn.execute(
+            "UPDATE message SET text = NULL, attributedBody = NULL WHERE ROWID = ?", (msg_rowid,)
+        )

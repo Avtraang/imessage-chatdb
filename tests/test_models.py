@@ -22,6 +22,7 @@ from imessage_chatdb.models import (
     PLUGIN_PAYLOAD_SUFFIX,
     Attachment,
     Chat,
+    ChatActivity,
     ChatMatch,
     ChatSummary,
     LiteMessage,
@@ -48,6 +49,7 @@ ALL_MODELS: tuple[type, ...] = (
     Chat,
     ChatSummary,
     ChatMatch,
+    ChatActivity,
     SearchHit,
 )
 
@@ -222,6 +224,7 @@ def test_instances_have_no_dict_and_reject_assignment() -> None:
         make_chat(),
         make_summary(),
         ChatMatch(1, "any;-;x", PHONE, None, False, 5),
+        ChatActivity(1, 5),
         make_hit(),
     ]
     for obj in instances:
@@ -275,6 +278,11 @@ def test_message_fields_match_design_section_5() -> None:
         "is_spam",
         "expressive_send_style_id",
         "enriched",
+        # 0.2 (docs/TYPEDSTREAM.md 9.5): the raw blob and the two private caches
+        # behind ``Message.body`` / ``Message.parts`` (init=False, compare=False).
+        "attributed_body_raw",
+        "_body_cache",
+        "_parts_cache",
     ]
 
 
@@ -324,6 +332,8 @@ def test_other_fields_match_design_section_5() -> None:
         "is_group",
         "last_rowid",
     ]
+    assert field_names(ChatActivity) == ["chat_rowid", "last_rowid"]
+    assert ChatActivity(7, 42).to_dict() == {"chat_rowid": 7, "last_rowid": 42}
     assert field_names(SearchHit) == [
         "rowid",
         "chat_rowid",

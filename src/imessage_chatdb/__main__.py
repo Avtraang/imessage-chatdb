@@ -5,7 +5,7 @@ Subcommands::
     check                       open the database, print profile + max ROWID + "Full Disk Access OK"
     tail [--since-rowid N] [--follow] [--limit N] [--interval S]
     chats [--limit N]
-    search TEXT [--limit N]
+    search TEXT [--limit N] [--chat GUID]
 
 Every subcommand takes ``--db PATH`` (default ``~/Library/Messages/chat.db``).
 ``tail``, ``chats`` and ``search`` print one JSON object per line from
@@ -187,6 +187,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=f"maximum number of hits (default: {DEFAULT_SEARCH_LIMIT})",
     )
+    srch.add_argument(
+        "--chat",
+        default=None,
+        metavar="GUID",
+        help="only search messages of the chat with this guid (default: every chat)",
+    )
     return parser
 
 
@@ -293,7 +299,7 @@ def _cmd_chats(args: argparse.Namespace, out: IO[str]) -> int:
 def _cmd_search(args: argparse.Namespace, out: IO[str]) -> int:
     conn = open_connection(args.db)
     try:
-        for hit in search_hits(conn, args.text, limit=args.limit):
+        for hit in search_hits(conn, args.text, limit=args.limit, chat_guid=args.chat):
             _emit(out, hit.to_dict())
     finally:
         conn.close()

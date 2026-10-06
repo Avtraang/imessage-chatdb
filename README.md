@@ -375,6 +375,7 @@ for hit in db.search("hello", limit=10):          # newest first
 is searched with `instr()` on the raw bytes (four case variants) and every SQL
 hit is re-checked in Python against the decoded text. It is a full scan: keep
 `limit` modest on large databases (section 7).
+`db.search("hello", chat_guid="any;-;+15550001234")` (CLI: `search TEXT --chat GUID`) scopes the scan to one chat, so hits in other chats never consume the oversample budget.
 
 ### Schema tolerance and profiles
 

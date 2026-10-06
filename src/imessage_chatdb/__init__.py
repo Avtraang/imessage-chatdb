@@ -52,7 +52,7 @@ from .search import extract_urls, snippet
 from .services import Service, normalize_service, service_family
 from .typedstream import clean_text, effective_text, extract_text
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "__version__",

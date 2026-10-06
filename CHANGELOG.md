@@ -4,6 +4,21 @@ All notable changes to `imessage-chatdb` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.1.1 — 2026-10-06
+
+### Added
+
+- `search(conn, q, *, chat_guid=None)` / `ChatDB.search(q, *, chat_guid=None)`:
+  when `chat_guid` is given only that chat's messages are searched
+  (`chat.guid = ?`, bound as a literal), so the oversample, Python recheck and
+  `limit` cap apply to that chat's rows alone and hits in other chats never
+  consume the budget; a guid with no matching chat yields `[]`. Implemented
+  with a second statement, `sql.SEARCH_IN_CHAT`, derived at import time from
+  `SEARCH` by inserting one `AND c.guid = ?` line; `SEARCH` itself is
+  untouched and still pinned byte-for-byte against the relay, and the
+  `chat_guid=None` path runs exactly the SQL it did in 0.1.0.
+- CLI: `search TEXT --chat GUID`.
+
 ## 0.1.0 — 2026-10-03
 
 First release: the chat.db reading code extracted from a private iMessage

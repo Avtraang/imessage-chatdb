@@ -33,7 +33,7 @@ from tests.fixtures.schema_profiles import (
 
 
 def test_version_and_all() -> None:
-    assert imessage_chatdb.__version__ == "0.1.0"
+    assert imessage_chatdb.__version__ == "0.1.1"
     assert "ChatDB" in imessage_chatdb.__all__
     # ``open`` is a package attribute but deliberately not an export (``import *`` safety)
     assert "open" not in imessage_chatdb.__all__

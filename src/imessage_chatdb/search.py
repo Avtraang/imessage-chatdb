@@ -13,6 +13,10 @@ returned.
 ``extract_urls`` and ``snippet`` are the relay's expressions verbatim; the
 relay keeps its own result-title prefix, short-query guard and contact
 resolution.
+
+``search(..., chat_guid=...)`` (0.1.1) runs ``SEARCH_IN_CHAT`` instead: the
+same statement with one ``AND c.guid = ?`` line, so the oversample, recheck
+and cap apply to that chat's rows only.
 """
 
 from __future__ import annotations
@@ -76,7 +80,12 @@ def _rows(
 
 
 def search(
-    conn: sqlite3.Connection, q: str, *, limit: int = 30, oversample: int = 2
+    conn: sqlite3.Connection,
+    q: str,
+    *,
+    limit: int = 30,
+    oversample: int = 2,
+    chat_guid: str | None = None,
 ) -> list[SearchHit]:
     """Full-scan text search, newest first, at most ``limit`` hits.
 
@@ -89,6 +98,12 @@ def search(
     false positives newer than the real hits can hide them; raise ``oversample``
     or scope the query when that matters.
 
+    ``chat_guid`` scopes the search to one chat (``chat.guid = ?``, bound as a
+    literal) through ``sql.SEARCH_IN_CHAT``; the oversample, recheck and cap
+    then apply to that chat's rows alone, so hits in other chats never consume
+    the budget.  A guid with no matching chat yields ``[]``.  With
+    ``chat_guid=None`` (the default) the global path runs exactly as before.
+
     ``SearchHit.text`` is the cleaned text and ``match_index`` the index the
     recheck found; ``is_from_me`` is a real ``bool``.
     """
@@ -98,7 +113,10 @@ def search(
     like = f"%{q}%"
     variants = (q, q.lower(), q.capitalize(), q.upper())
     needle = q.lower()
-    rows = _rows(conn, sql.SEARCH, (like, *variants, limit * oversample))
+    if chat_guid is None:
+        rows = _rows(conn, sql.SEARCH, (like, *variants, limit * oversample))
+    else:
+        rows = _rows(conn, sql.SEARCH_IN_CHAT, (like, *variants, chat_guid, limit * oversample))
     out: list[SearchHit] = []
     for r in rows:
         text = clean_text(effective_text(r["text"], r["attributed_body"]))

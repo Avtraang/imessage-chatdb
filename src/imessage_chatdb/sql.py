@@ -4,7 +4,10 @@ Every constant here is the relay's statement text **verbatim** (interior
 whitespace included); ``tests/test_schema.py`` compares each one against a
 copy taken once from that relay (``tests/fixtures/relay_sql_golden.py``).
 Changing a statement is therefore a deliberate, versioned change, never a
-side effect of a refactor.
+side effect of a refactor.  The one exception is ``SEARCH_IN_CHAT``, a
+library addition derived from ``SEARCH`` at import time by inserting a single
+``AND c.guid = ?`` line (``SEARCH`` itself is untouched); the tests pin that
+derivation instead of a golden copy.
 
 Statements the relay builds with an f-string keep the literal ``{ph}``
 placeholder; expand it with :func:`expand_in` before executing::
@@ -42,6 +45,7 @@ __all__ = [
     "UNREAD",
     "ONE_TO_ONE_ACTIVITY",
     "SEARCH",
+    "SEARCH_IN_CHAT",
     "PAYLOAD_FOR",
     "ATTACHMENT_BY_GUID",
     "CHAT_ATTACHMENTS",
@@ -177,6 +181,26 @@ SEARCH = """
               AND IFNULL(m.associated_message_type, 0) = 0
             ORDER BY m.ROWID DESC LIMIT ?
         """
+
+#: The tapback-exclusion line of ``SEARCH``; the chat filter is inserted before it.
+_SEARCH_ASSOC_LINE = "AND IFNULL(m.associated_message_type, 0) = 0"
+
+
+def _with_chat_filter(statement: str) -> str:
+    """``statement`` with ``AND c.guid = ?`` inserted as the line before the tapback
+    exclusion, at the same indentation.  Raises ``ValueError`` if the anchor is
+    missing, so a reshaped ``SEARCH`` cannot silently produce an unfiltered search.
+    """
+    i = statement.index(_SEARCH_ASSOC_LINE)
+    line_start = statement.rindex("\n", 0, i) + 1
+    indent = statement[line_start:i]
+    return statement[:line_start] + indent + "AND c.guid = ?\n" + statement[line_start:]
+
+
+# ---- search within one chat (library addition, 0.1.1; not a relay statement) ----
+# params = (like, q, q.lower(), q.capitalize(), q.upper(), chat_guid, n)
+
+SEARCH_IN_CHAT = _with_chat_filter(SEARCH)
 
 # ---- payloads and attachments ----
 

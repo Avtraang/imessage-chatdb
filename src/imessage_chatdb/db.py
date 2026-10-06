@@ -307,9 +307,12 @@ class ChatDB:
 
     # -- search -------------------------------------------------------------
 
-    def search(self, q: str, *, limit: int = 30) -> list[SearchHit]:
+    def search(
+        self, q: str, *, limit: int = 30, chat_guid: str | None = None
+    ) -> list[SearchHit]:
+        """:func:`imessage_chatdb.search.search`; ``chat_guid`` scopes it to one chat."""
         with self.connection() as conn:
-            return _search.search(conn, q, limit=limit)
+            return _search.search(conn, q, limit=limit, chat_guid=chat_guid)
 
     # -- watching -----------------------------------------------------------
 

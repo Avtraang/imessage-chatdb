@@ -30,13 +30,34 @@ from tests.fixtures.schema_profiles import PROFILES, column_names, missing_colum
 # Golden names that are not sql.py constants (they are checked elsewhere).
 _NOT_IN_SQL_MODULE = {"MESSAGE_SELECT", "LINK_BALLOON"}
 
+# sql.py constants that are library additions derived from a relay statement
+# (no golden copy; their derivation is pinned below instead).
+_DERIVED = {"SEARCH_IN_CHAT"}
+
 
 def _sql_constants() -> list[str]:
     return [n for n in sql.__all__ if n.isupper() and n != "IN_PLACEHOLDER"]
 
 
 def test_every_sql_constant_has_a_golden_entry() -> None:
-    assert set(_sql_constants()) == set(golden.GOLDEN) - _NOT_IN_SQL_MODULE
+    assert set(_sql_constants()) - _DERIVED == set(golden.GOLDEN) - _NOT_IN_SQL_MODULE
+    assert _DERIVED.isdisjoint(golden.GOLDEN)  # a derived statement is never "golden"
+
+
+def test_search_in_chat_is_search_plus_one_guid_line() -> None:
+    """``SEARCH_IN_CHAT`` = ``SEARCH`` with exactly one ``AND c.guid = ?`` line inserted
+    before the tapback exclusion; removing that line gives ``SEARCH`` back byte-for-byte."""
+    assert sql.SEARCH_IN_CHAT != sql.SEARCH
+    assert sql.SEARCH_IN_CHAT.count("AND c.guid = ?") == 1
+    assert sql.SEARCH.count("c.guid = ?") == 0
+    lines = sql.SEARCH_IN_CHAT.split("\n")
+    (i,) = [k for k, line in enumerate(lines) if line.strip() == "AND c.guid = ?"]
+    assert lines[i + 1].strip() == "AND IFNULL(m.associated_message_type, 0) = 0"
+    assert lines[i][: len(lines[i]) - len(lines[i].lstrip())] == (
+        lines[i + 1][: len(lines[i + 1]) - len(lines[i + 1].lstrip())]
+    )  # same indentation as the line it precedes
+    assert "\n".join(lines[:i] + lines[i + 1 :]) == sql.SEARCH
+    assert sql.SEARCH_IN_CHAT.count("?") == sql.SEARCH.count("?") + 1
 
 
 @pytest.mark.parametrize("name", sorted(set(golden.GOLDEN) - _NOT_IN_SQL_MODULE))

@@ -381,6 +381,22 @@ def test_search_limit_and_no_hits(fixture_db: FixtureDB) -> None:
     assert lines == []
 
 
+def test_search_chat_filter(fixture_db: FixtureDB) -> None:
+    ids = populate(fixture_db)
+    db = str(fixture_db.path)
+    assert build_parser().parse_args(["search", "x"]).chat is None
+    code, lines, _ = run(["search", "hello", "--chat", GROUP, "--db", db])
+    assert code == EXIT_OK
+    assert [h["rowid"] for h in lines] == [ids["m3"]]
+    assert lines[0]["chat_guid"] == GROUP
+    _, lines, _ = run(["search", "hello", "--chat", CHAT, "--db", db])
+    assert [h["rowid"] for h in lines] == [ids["m1"]]
+    _, lines, _ = run(["search", "hello", "--chat", "any;-;no-such-chat", "--db", db])
+    assert lines == []
+    _, lines, _ = run(["search", "hello", "--chat", "x' OR 1=1 --", "--db", db])
+    assert lines == []
+
+
 # ---------------------------------------------------------------------------
 # broken pipe: ``python -m imessage_chatdb tail ... | head -1``
 # ---------------------------------------------------------------------------

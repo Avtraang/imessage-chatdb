@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 
+from imessage_chatdb import sql
 from imessage_chatdb.connection import open_connection
 from imessage_chatdb.models import SearchHit
 from imessage_chatdb.search import extract_urls, search, snippet
@@ -222,3 +223,150 @@ def test_orphan_messages_are_not_searched(
     rid = add_chat(w, f"any;-;{A}", 45)
     add_message(w, rid, text="orphan needle", join=False)
     assert search(reader, "needle") == []
+
+
+# ---------------------------------------------------------------------------
+# search(..., chat_guid=...)  (0.1.1)
+# ---------------------------------------------------------------------------
+
+
+def _traced(conn: sqlite3.Connection, fn: Callable[[], list[SearchHit]]) -> list[str]:
+    """Run ``fn`` and return the SQL text sqlite3 traced for it (parameters expanded)."""
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        fn()
+    finally:
+        conn.set_trace_callback(None)
+    return statements
+
+
+def test_chat_guid_filter_returns_only_that_chats_hits(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    w = fixture_db.writer
+    one = add_chat(w, f"any;-;{A}", 45)
+    grp = add_chat(w, "any;+;g", 43, display_name="Crew")
+    m1 = add_message(w, one, text="mango smoothie", handle=A)
+    g1 = add_message(w, grp, body=encode_attributed_body("mango for the crew"), handle=B)
+    m2 = add_message(w, one, body=encode_attributed_body("more Mango please"), is_from_me=1)
+    g2 = add_message(w, grp, text="MANGO MANGO", handle=A)
+    add_message(w, one, text="unrelated", handle=A)
+
+    assert [h.rowid for h in search(reader, "mango")] == [g2, m2, g1, m1]  # global: unchanged
+
+    one_hits = search(reader, "mango", chat_guid=f"any;-;{A}")
+    assert [h.rowid for h in one_hits] == [m2, m1]
+    assert all(h.chat_rowid == one and h.chat_guid == f"any;-;{A}" for h in one_hits)
+    assert all(isinstance(h, SearchHit) for h in one_hits)
+    assert one_hits[1].text == "mango smoothie" and one_hits[1].match_index == 0
+    assert one_hits[0].text == "more Mango please" and one_hits[0].match_index == 5
+    assert one_hits[0].is_from_me is True and one_hits[1].sender_handle == A
+
+    grp_hits = search(reader, "mango", chat_guid="any;+;g")
+    assert [h.rowid for h in grp_hits] == [g2, g1]
+    assert all(h.chat_display_name == "Crew" and h.is_group for h in grp_hits)
+    # Same shape as the global path: the filtered hit equals the global hit for that row.
+    by_rowid = {h.rowid: h for h in search(reader, "mango")}
+    assert one_hits == [by_rowid[m2], by_rowid[m1]]
+    assert grp_hits == [by_rowid[g2], by_rowid[g1]]
+
+
+def test_chat_guid_with_no_hits_or_no_chat_is_empty(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    w = fixture_db.writer
+    one = add_chat(w, f"any;-;{A}", 45)
+    other = add_chat(w, f"any;-;{B}", 45)
+    add_message(w, one, text="kiwi here")
+    add_message(w, other, text="nothing of note")
+    assert search(reader, "kiwi", chat_guid=f"any;-;{B}") == []  # chat exists, no hit
+    assert search(reader, "kiwi", chat_guid="any;-;+15550000000") == []  # no such chat
+    assert search(reader, "kiwi", chat_guid="") == []  # empty guid matches no chat
+    assert [h.chat_rowid for h in search(reader, "kiwi", chat_guid=f"any;-;{A}")] == [one]
+    # An empty query still short-circuits before any SQL, filter or not.
+    assert _traced(reader, lambda: search(reader, "   ", chat_guid=f"any;-;{A}")) == []
+
+
+def test_global_path_runs_the_pinned_search_statement(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    """``chat_guid=None`` executes ``sql.SEARCH`` and nothing else; the filter
+    executes ``sql.SEARCH_IN_CHAT``.  sqlite3 traces the statement with its
+    parameters expanded, so the comparison is made on the text up to the
+    first placeholder and on the clause that only the filtered statement has."""
+    w = fixture_db.writer
+    rid = add_chat(w, f"any;-;{A}", 45)
+    add_message(w, rid, text="plum")
+
+    head = sql.SEARCH[: sql.SEARCH.index("?")]
+    (global_sql,) = _traced(reader, lambda: search(reader, "plum"))
+    assert global_sql.strip().startswith(head.strip())
+    assert "c.guid = " not in global_sql
+    assert global_sql.count("instr(m.attributedBody") == 4
+    assert global_sql.rstrip().endswith("ORDER BY m.ROWID DESC LIMIT 60")
+
+    guid_line = f"AND c.guid = 'any;-;{A}'"
+    (scoped_sql,) = _traced(reader, lambda: search(reader, "plum", chat_guid=f"any;-;{A}"))
+    assert scoped_sql.count("c.guid = ") == 1
+    assert scoped_sql.count("instr(m.attributedBody") == 4
+    assert scoped_sql.rstrip().endswith("ORDER BY m.ROWID DESC LIMIT 60")
+    # The two traced statements differ by exactly the inserted guid line.
+    scoped_lines = scoped_sql.split("\n")
+    assert [line.strip() for line in scoped_lines].count(guid_line) == 1
+    without = [line for line in scoped_lines if line.strip() != guid_line]
+    assert "\n".join(without) == global_sql
+
+
+def test_limit_and_oversample_apply_within_the_chat(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    w = fixture_db.writer
+    one = add_chat(w, f"any;-;{A}", 45)
+    noisy = add_chat(w, "any;+;noisy", 43)
+    real = add_message(w, one, text="apple pie")
+    # Ten newer hits in another chat: globally they fill limit*oversample long
+    # before the older real hit; filtered, they are not even candidates.
+    noise = [add_message(w, noisy, text=f"apple {i}") for i in range(10)]
+    assert [h.rowid for h in search(reader, "apple", limit=2, oversample=2)] == noise[-1:-3:-1]
+    assert [h.rowid for h in search(reader, "apple", limit=2, chat_guid=f"any;-;{A}")] == [real]
+
+    # Within the chat the fixed oversample still applies: four newer blobs match
+    # "NSDictionary" only in their archive bytes, the real hit is older.
+    real2 = add_message(w, one, text="NSDictionary in text")
+    for i in range(4):
+        add_message(w, one, body=encode_attributed_body(f"decoy {i}"))
+    for i in range(6):  # more false positives in the other chat change nothing
+        add_message(w, noisy, body=encode_attributed_body(f"noise {i}"))
+    guid = f"any;-;{A}"
+    assert search(reader, "NSDictionary", limit=2, oversample=2, chat_guid=guid) == []
+    hits = search(reader, "NSDictionary", limit=2, oversample=3, chat_guid=guid)
+    assert [h.rowid for h in hits] == [real2]
+    hits = search(reader, "NSDictionary", limit=1, oversample=5, chat_guid=guid)
+    assert [h.rowid for h in hits] == [real2]
+    # Cap at limit within the chat, newest first.
+    more = [add_message(w, one, text=f"apple again {i}") for i in range(3)]
+    assert [h.rowid for h in search(reader, "apple", limit=2, chat_guid=guid)] == more[-1:-3:-1]
+    hits = search(reader, "apple", limit=10, chat_guid=guid)
+    assert [h.rowid for h in hits] == [*more[::-1], real]
+
+
+def test_sql_looking_chat_guid_is_a_literal(
+    fixture_db: FixtureDB, reader: sqlite3.Connection
+) -> None:
+    w = fixture_db.writer
+    evil = "x' OR 1=1 --"
+    tricky = add_chat(w, evil, 45, identifier="x")
+    plain = add_chat(w, f"any;-;{A}", 45)
+    t = add_message(w, tricky, text="secret cherry")
+    add_message(w, plain, text="public cherry")
+
+    hits = search(reader, "cherry", chat_guid=evil)
+    assert [h.rowid for h in hits] == [t] and hits[0].chat_guid == evil
+    # A guid that would match everything if interpolated matches no chat at all.
+    assert search(reader, "cherry", chat_guid="y' OR 1=1 --") == []
+    assert search(reader, "cherry", chat_guid="' OR ''='") == []
+    assert search(reader, "cherry", chat_guid=f"{evil};DROP TABLE message") == []
+    (traced,) = _traced(reader, lambda: search(reader, "cherry", chat_guid=evil))
+    assert "c.guid = 'x'' OR 1=1 --'" in traced  # bound, quoted, not interpolated
+    assert len(search(reader, "cherry")) == 2  # the table is intact and the global path unchanged

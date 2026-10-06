@@ -539,6 +539,19 @@ def test_search_matches_module_function(
     assert len(db.search("e", limit=2)) == 2
 
 
+def test_search_chat_guid_passes_through(
+    populated: dict[str, Any], reader: tuple[sqlite3.Connection, Schema]
+) -> None:
+    db: ChatDB = populated["fx"].db
+    conn, _schema = reader
+    hits = db.search("hello")
+    assert hits, "the populated fixture must contain a hello hit"
+    guid = hits[0].chat_guid
+    assert db.search("hello", chat_guid=guid) == search_mod.search(conn, "hello", chat_guid=guid)
+    assert all(h.chat_guid == guid for h in db.search("hello", chat_guid=guid))
+    assert db.search("hello", chat_guid="any;-;no-such-chat") == []
+
+
 # ---------------------------------------------------------------------------
 # open()
 # ---------------------------------------------------------------------------
@@ -606,7 +619,7 @@ def test_package_reexports_resolve_to_submodule_objects() -> None:
     assert imessage_chatdb.ChatDBBusy is errors.ChatDBBusy
     assert imessage_chatdb.CursorAhead is errors.CursorAhead
     assert imessage_chatdb.Schema is Schema
-    assert imessage_chatdb.__version__ == "0.1.0"
+    assert imessage_chatdb.__version__ == "0.1.1"
 
 
 def test_all_names_are_real_attributes_not_lazy() -> None:

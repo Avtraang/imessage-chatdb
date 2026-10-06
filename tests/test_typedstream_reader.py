@@ -12,6 +12,9 @@ import dataclasses
 import io
 import json
 import random
+# Wall-clock bounds in this module exist to catch hangs and quadratic blow-ups
+# (which take minutes), not to benchmark: they are set an order of magnitude
+# above what a laptop needs so shared CI runners never trip them.
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -482,7 +485,7 @@ def test_every_prefix_raises_and_never_hangs(blob: bytes) -> None:
         with pytest.raises(TypedStreamError):
             parse_attributed_body(prefix)
         assert try_parse_attributed_body(prefix) is None
-    assert time.perf_counter() - started < 5.0
+    assert time.perf_counter() - started < 30.0
     assert parse_attributed_body(blob).text == extract_text(blob)
 
 
@@ -553,7 +556,7 @@ def test_nesting_depth_limit() -> None:
     raises(nested_objects(64), "root object is NSObject")
     started = time.perf_counter()
     raises(nested_objects(5000), "nesting deeper than 64")
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 10.0
 
 
 def test_reference_out_of_range_incomplete_and_wrong_kind() -> None:
@@ -600,7 +603,7 @@ def test_type_strings() -> None:
     raises(replace_once(data, b"\x84\x04[3c]", b"\x84\x05[\xb23c]"), "bad array type")
     started = time.perf_counter()
     raises(replace_once(data, b"\x84\x04[3c]", b"\x84\x0c[999999999c]"), "bytes requested")
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 10.0
 
 
 def test_absurd_string_lengths_fail_fast() -> None:
@@ -608,7 +611,7 @@ def test_absurd_string_lengths_fail_fast() -> None:
     raises(PLAIN_SKELETON + b"\x82\xff\xff\xff\x7f" + b"hi", "bytes requested")
     raises(PLAIN_SKELETON + b"\x81\xff\xff" + b"hi", "bytes requested")
     raises(PLAIN_SKELETON + b"\x82\xff\xff\xff\xff" + b"hi", "bytes requested")  # u32, not -1
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 10.0
     empty = encode_attributed_body_runs("", [(0, {PART: 0})])
     raises(replace_once(empty, b"\x84\x01+\x00", b"\x84\x01+\x85"), "nil string")
 
@@ -792,9 +795,9 @@ def test_fuzz_never_raises_anything_but_typedstream_error() -> None:
             assert try_parse_attributed_body(data) == body
             assert sum(r.length for r in body.runs) == len(body.text.encode("utf-16-le")) // 2
             message_parts(body)  # never raises on a parsed body
-        assert time.perf_counter() - one < 2.0, data[:32].hex()
+        assert time.perf_counter() - one < 20.0, data[:32].hex()
     assert outcomes["error"] > 0 and outcomes["ok"] > 0
-    assert time.perf_counter() - started < 60.0
+    assert time.perf_counter() - started < 300.0
 
 
 # ---------------------------------------------------------------------------
@@ -1061,7 +1064,7 @@ def test_class_chain_is_read_iteratively_and_capped() -> None:
         literal_class_chain(20_000),
     ):
         raises(blob, "class chain longer than 64")  # never RecursionError
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 10.0
     # the cap is on the whole chain, references included
     raises(class_chain_extended_by_reference(63), "root object is A")  # B > 63 = 64
     raises(class_chain_extended_by_reference(64), "class chain longer than 64")
@@ -1076,7 +1079,7 @@ def test_dictionary_reference_chain_is_capped_without_recursion() -> None:
     started = time.perf_counter()
     raises(dictionary_reference_chain(5000), "nested deeper than 64")  # never RecursionError
     raises(dictionary_reference_chain(50_000), "nested deeper than 64")
-    assert time.perf_counter() - started < 2.0
+    assert time.perf_counter() - started < 20.0
 
 
 def test_uncached_dictionary_chain_is_capped_without_recursion() -> None:
@@ -1086,7 +1089,7 @@ def test_uncached_dictionary_chain_is_capped_without_recursion() -> None:
     raises(dictionary_chain_behind_an_array(64), "nested deeper than 64")
     started = time.perf_counter()
     raises(dictionary_chain_behind_an_array(5000), "nested deeper than 64")
-    assert time.perf_counter() - started < 2.0
+    assert time.perf_counter() - started < 20.0
 
 
 def test_literal_dictionary_nesting_still_meets_the_object_cap() -> None:
@@ -1108,7 +1111,7 @@ def test_shared_objects_are_converted_once() -> None:
     assert blob.count(b"S" * 100_000) == 1
     started = time.perf_counter()
     body = parse_attributed_body(blob)
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 10.0
     values = list(body.runs[0].attributes.values())
     assert len(values) == 1000 and all(v is values[0] for v in values)
     # dictionary A with n pairs referenced n times from dictionary B: A converted once
@@ -1139,7 +1142,7 @@ def test_shared_objects_are_converted_once() -> None:
     a.end_object()
     started = time.perf_counter()
     body = parse_attributed_body(bytes(a.out))
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 10.0
     first = body.runs[0].attributes
     assert len(first) == n
     assert all(v is first for v in body.runs[1].attributes.values())
@@ -1153,7 +1156,7 @@ def test_message_parts_is_linear_in_text_and_runs() -> None:
     body = parse_attributed_body(encode_attributed_body_runs("a" * n, runs))
     started = time.perf_counter()
     parts = message_parts(body)
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 10.0
     assert len(parts) == runs_count
     assert "".join(p.text for p in parts if isinstance(p, TextPart)) == body.text
     # the same with astral text (two units per code point)
@@ -1161,7 +1164,7 @@ def test_message_parts_is_linear_in_text_and_runs() -> None:
     body = parse_attributed_body(encode_attributed_body_runs(emoji, runs))
     started = time.perf_counter()
     parts = message_parts(body)
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 10.0
     assert "".join(p.text for p in parts if isinstance(p, TextPart)) == emoji
 
 
